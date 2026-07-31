@@ -1,0 +1,540 @@
+openapi: 3.0.3
+info:
+  title: CatWAF API
+  version: 1.0.1
+  description: |
+    CatWAF's control-plane API — everything the dashboard itself calls.
+    There's no separate "public API" here; this is the real thing the
+    frontend uses, documented so you can script against it or build your
+    own tooling on top.
+
+    **Scope of this document:** CatWAF has ~150 routes across 23 files.
+    This spec covers the core groups in real depth — auth, WAF engine
+    settings, custom rules, IP/geo lists, the security score, honeypots,
+    sensitive-file protection, and operational modes (panic/maintenance/
+    config signing) — rather than a shallow stub for every endpoint. Routes
+    not yet documented here still exist and work; see `backend/routes/` for
+    the full list. Expanding this file's coverage is tracked in
+    `ROADMAP.md`.
+
+    **One thing worth knowing:** the dashboard stats/traffic endpoints
+    (`/api/stats`, `/api/traffic/*`) return real data — sourced from
+    Coraza's own audit log via `services/requestLog.js`, not a demo feed —
+    but on a fresh install with no real traffic through it yet, that
+    honestly means zeros and empty arrays rather than a populated-looking
+    dashboard. And
+    `/api/security-score` and `/api/security/score` are two URLs for the
+    exact same underlying check — kept both for backward compatibility
+    after a v3.1 consolidation (see `CHANGELOG.md`).
+  license:
+    name: MIT
+    url: https://github.com/agugusgeyehe-dot/catwaf/blob/main/LICENSE
+externalDocs:
+  description: Full documentation
+  url: https://github.com/agugusgeyehe-dot/catwaf/tree/main/docs
+
+servers:
+  - url: http://localhost:8000
+    description: Local dev (npm run dev)
+  - url: http://localhost:8000
+    description: Docker Compose (backend, port published directly)
+
+tags:
+  - { name: Auth, description: Login and session handling }
+  - { name: WAF Engine, description: Core engine mode, paranoia level, anomaly thresholds, and the general settings bucket }
+  - { name: Rules, description: Custom Coraza rules and rule exclusions }
+  - { name: Network, description: IP allow/block lists and geo-blocking }
+  - { name: Security Score, description: The dashboard's Security page — an honest, state-derived posture score }
+  - { name: Honeypot, description: Decoy paths that catch automated scanning }
+  - { name: Sensitive Files, description: Blocking access to files that shouldn't be publicly reachable }
+  - { name: Modes, description: Panic mode, maintenance mode, and configuration signing }
+  - { name: Dashboard, description: Stats, traffic charts, logs, and audit trail }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Obtained from POST /api/auth/login. Unauthenticated requests are
+        still accepted for GET routes (treated as the built-in `guest`/
+        viewer role) — the token only matters for anything that mutates
+        state, which requires the `admin` role.
+
+  responses:
+    Unauthorized:
+      description: Read-only role — log in as admin to modify this.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BadRequest:
+      description: Validation failed — the request body or params didn't pass checks.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No matching resource.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Login rate limit exceeded (10 attempts / 5 minutes per IP+username).
+      headers:
+        Retry-After: { schema: { type: integer }, description: Seconds until the limit resets }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string, example: 'Read-only role. Log in as admin to modify.' }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, example: admin }
+        password: { type: string, format: password, example: admin }
+
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string, description: 'JWT — send as `Authorization: Bearer <token>` on subsequent requests' }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            username: { type: string }
+            role: { type: string, enum: [admin, viewer] }
+
+    IpListEntry:
+      type: object
+      properties:
+        ip: { type: string, example: 203.0.113.7 }
+        note: { type: string }
+        added_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+
+    AddIpRequest:
+      type: object
+      required: [ip, list]
+      properties:
+        ip: { type: string, description: 'IPv4/IPv6 address or CIDR range', example: 203.0.113.7 }
+        list: { type: string, enum: [whitelist, blacklist] }
+        note: { type: string, maxLength: 256 }
+        ttl_minutes: { type: integer, description: Auto-expire this entry after N minutes. Omit for a permanent entry. }
+
+    CustomRule:
+      type: object
+      required: [value, name]
+      properties:
+        id: { type: string }
+        variable: { type: string, description: 'Coraza variable, e.g. ARGS, REQUEST_URI, REQUEST_HEADERS:User-Agent', default: ARGS }
+        operator: { type: string, enum: [contains, streq, beginsWith, endsWith, rx, pm, eq, ge, le, gt, lt], default: contains }
+        value: { type: string, maxLength: 512 }
+        name: { type: string, maxLength: 128, description: Used as the rule's msg field }
+        action: { type: string, enum: [deny, pass, allow, drop, log, block], default: deny }
+        phase: { type: integer, minimum: 1, maximum: 5, default: 2 }
+        enabled: { type: boolean, default: true }
+
+    WafSettings:
+      type: object
+      description: The subset of WAF state this endpoint allows reading/writing — see the SETTING_KEYS allow-list in routes/waf.js.
+      properties:
+        allowed_methods: { type: array, items: { type: string }, example: [GET, POST, HEAD, OPTIONS] }
+        allowed_content_types: { type: array, items: { type: string } }
+        max_request_body_size: { type: number }
+        max_file_upload_size: { type: number }
+        request_body_inspection: { type: boolean }
+        response_body_inspection: { type: boolean }
+        audit_log: { type: boolean }
+        enforce_bodyproc_urlencoded: { type: boolean }
+        early_blocking: { type: boolean }
+        sampling_percentage: { type: number, minimum: 0, maximum: 100 }
+        blocked_user_agents: { type: array, items: { type: string }, example: [sqlmap, nikto, nmap] }
+        header_rules: { type: array, items: { type: object } }
+
+    SecurityScoreCheck:
+      type: object
+      properties:
+        id: { type: string }
+        category: { type: string }
+        weight: { type: integer }
+        status: { type: string, enum: [pass, warn, fail, unknown] }
+        label: { type: string }
+        detail: { type: string }
+        recommendation: { type: string, nullable: true }
+
+    SecurityScore:
+      type: object
+      properties:
+        score: { type: integer, minimum: 0, maximum: 100 }
+        grade: { type: string, enum: [A, B, C, D, F] }
+        checks: { type: array, items: { $ref: '#/components/schemas/SecurityScoreCheck' } }
+        by_category:
+          type: object
+          additionalProperties:
+            type: array
+            items: { $ref: '#/components/schemas/SecurityScoreCheck' }
+        passing: { type: integer }
+        warnings: { type: integer }
+        critical_failures: { type: integer }
+        total_checks: { type: integer }
+        recommendations:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              label: { type: string }
+              recommendation: { type: string }
+              severity: { type: string, enum: [high, medium, low] }
+        computed_at: { type: string, format: date-time }
+
+    HoneypotPath:
+      type: object
+      properties:
+        path: { type: string, example: /wp-admin/install.php }
+        label: { type: string }
+        enabled: { type: boolean }
+
+    PanicState:
+      type: object
+      properties:
+        active: { type: boolean }
+        activated_at: { type: string, format: date-time, nullable: true }
+        activated_by: { type: string, nullable: true }
+        prior_state: { type: object, nullable: true, description: 'WAF settings snapshot to restore on deactivate' }
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      description: Rate limited to 10 attempts per 5 minutes, keyed by IP + username.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/waf/engine:
+    get:
+      tags: [WAF Engine]
+      summary: Get current engine mode
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { mode: { type: string, enum: [On, DetectionOnly, Off] } } } } } }
+    post:
+      tags: [WAF Engine]
+      summary: Set engine mode
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [mode], properties: { mode: { type: string, enum: [On, DetectionOnly, Off] } } } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/waf/paranoia:
+    get:
+      tags: [WAF Engine]
+      summary: Get current paranoia level (PL1-PL4)
+      responses:
+        '200': { description: OK }
+    post:
+      tags: [WAF Engine]
+      summary: Set paranoia level
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [level], properties: { level: { type: integer, enum: [1, 2, 3, 4] } } } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/waf/settings:
+    get:
+      tags: [WAF Engine]
+      summary: Get general WAF settings
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/WafSettings' } } } }
+    patch:
+      tags: [WAF Engine]
+      summary: Update WAF settings (no Caddy reload)
+      description: >
+        Only accepts keys in the WafSettings schema — this endpoint used to
+        accept any key present on internal WAF state at all (a mass-assignment
+        bug fixed in v3.0.1; see CHANGELOG.md), which let a single request
+        here silently bypass every other route's validation. Fixed now.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WafSettings' } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [WAF Engine]
+      summary: Update WAF settings and reload Caddy
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WafSettings' } } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/rules/custom:
+    get:
+      tags: [Rules]
+      summary: List custom rules
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/CustomRule' } } } } }
+    post:
+      tags: [Rules]
+      summary: Add a custom rule
+      description: >
+        variable/operator/action/phase are validated against allow-lists;
+        value/name are free text (escaped before being written into the
+        live Caddyfile — see the config-injection fix in CHANGELOG.md v3.0.1).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CustomRule' } } }
+      responses:
+        '200': { description: Added }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/rules/custom/{rule_id}:
+    delete:
+      tags: [Rules]
+      summary: Delete a custom rule
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: rule_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Removed }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/ip/whitelist:
+    get:
+      tags: [Network]
+      summary: List whitelisted IPs (expired TTL entries pruned on read)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/IpListEntry' } } } } }
+
+  /api/ip/blacklist:
+    get:
+      tags: [Network]
+      summary: List blacklisted IPs (expired TTL entries pruned on read)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/IpListEntry' } } } } }
+
+  /api/ip/add:
+    post:
+      tags: [Network]
+      summary: Add an IP or CIDR range to a list
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AddIpRequest' } } }
+      responses:
+        '200': { description: Added }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/ip/{list}/{ip}:
+    delete:
+      tags: [Network]
+      summary: Remove an IP from a list
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: list, in: path, required: true, schema: { type: string, enum: [whitelist, blacklist] } }
+        - { name: ip, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Removed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/geo:
+    get:
+      tags: [Network]
+      summary: List blocked country codes
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { blocked_countries: { type: array, items: { type: string } } } } } } }
+
+  /api/geo/{cc}:
+    post:
+      tags: [Network]
+      summary: Toggle geo-blocking for a country
+      description: cc must be a 2-letter ISO country code (case-insensitive; normalized to uppercase).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: cc, in: path, required: true, schema: { type: string, pattern: '^[A-Za-z]{2}$' } }
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/security/score:
+    get:
+      tags: [Security Score]
+      summary: Get the current security posture score
+      description: >
+        Computed live from actual configuration. Checks CatWAF can't verify
+        (e.g. origin TLS without a Cloudflare connection) are marked
+        `unknown` rather than guessed. See services/securityScore.js.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SecurityScore' } } } }
+
+  /api/security-score:
+    get:
+      tags: [Security Score]
+      summary: Get the current security posture score (legacy path)
+      description: Identical response to GET /api/security/score — kept for backward compatibility. See the "Correction" note in CHANGELOG.md.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SecurityScore' } } } }
+
+  /api/honeypot/paths:
+    post:
+      tags: [Honeypot]
+      summary: Add a custom decoy path
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [path], properties: { path: { type: string, example: /admin/backup.zip }, label: { type: string, maxLength: 128 } } } } }
+      responses:
+        '200': { description: Added }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/honeypot/paths/{path}:
+    delete:
+      tags: [Honeypot]
+      summary: Remove a decoy path
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Removed }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/honeypot/toggle:
+    post:
+      tags: [Honeypot]
+      summary: Enable or disable the honeypot system entirely
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/sensitive/blocked:
+    get:
+      tags: [Sensitive Files]
+      summary: List manually blocked paths
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { blocked: { type: array, items: { type: string } } } } } } }
+
+  /api/sensitive/block:
+    post:
+      tags: [Sensitive Files]
+      summary: Manually block a path
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [path], properties: { path: { type: string, example: /.env } } } } }
+      responses:
+        '200': { description: Blocked }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/panic-mode:
+    get:
+      tags: [Modes]
+      summary: Get panic mode status
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PanicState' } } } }
+
+  /api/panic-mode/activate:
+    post:
+      tags: [Modes]
+      summary: Activate panic mode (PL4, engine On, anomaly thresholds tightened to 2, 100% sampling)
+      description: Snapshots current settings first so /api/panic-mode/deactivate can restore them exactly.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Activated }
+        '400': { description: Already active }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/panic-mode/deactivate:
+    post:
+      tags: [Modes]
+      summary: Deactivate panic mode and restore the pre-panic settings snapshot
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Deactivated }
+        '400': { description: Not currently active }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/config/sign:
+    post:
+      tags: [Modes]
+      summary: Sign the current WAF configuration (SHA-256 of WAF + rule-category state)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Signed }
+        '403': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/config/verify:
+    get:
+      tags: [Modes]
+      summary: Check whether the current config matches its last signature
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signed: { type: boolean }
+                  tampered: { type: boolean, nullable: true }
+                  signature: { type: object, nullable: true }
+                  current_hash: { type: string }
+
+  /api/health:
+    get:
+      tags: [Dashboard]
+      summary: Basic health check
+      responses:
+        '200': { description: OK }
+
+  /api/stats:
+    get:
+      tags: [Dashboard]
+      summary: Dashboard summary stats
+      description: 'Real data, sourced from Coraza''s own audit log via services/requestLog.js — not a demo feed. On a fresh install with no real traffic yet, counts are honestly 0 rather than populated-looking placeholder numbers.'
+      responses:
+        '200': { description: OK }
+
+  /api/audit:
+    get:
+      tags: [Dashboard]
+      summary: Real audit trail of admin actions
+      description: Unlike /api/stats, this is real — every write action across the app calls auditSvc.audit() and lands here.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 200 } }
+      responses:
+        '200': { description: OK }

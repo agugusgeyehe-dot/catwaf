@@ -1,0 +1,97 @@
+# Contributing to CatWAF
+
+Thanks for taking a look. CatWAF is source available under the [PolyForm Internal Use License](LICENSE) — the project can't accept code contributions (pull requests) right now, but bug reports, feature requests, and security disclosures via issues are genuinely welcome, and reading/running the code for your own use is exactly what the license is for.
+
+## Getting set up
+
+```bash
+git clone https://github.com/agugusgeyehe-dot/catwaf
+cd catwaf
+npm run install:all
+npm run dev
+```
+
+This starts the backend, the frontend dev server, and — if Caddy with the Coraza module is installed (`npm install` fetches it automatically) — Caddy itself, fronting `:3000` (dashboard) and `:8000` (API) with a dev-only Coraza block so requests are actually WAF-inspected, the same as production. The backend and Vite move to internal ports (`:8001`/`:5173` by default) in that case; hit `:3000`/`:8000` as usual either way. If Caddy isn't available, `npm run dev` says so and falls back to the backend and Vite talking to each other directly with no WAF in the loop — see [docs/installation.md](docs/installation.md).
+
+Run `catwaf setup --full` first if you haven't — there are no default accounts, so without it there's nothing to log into.
+
+**Editions when developing.** `npm run install:all` and `npm run dev` are the Full path, which is what you want for frontend work. If you are working on the WAF, CLI or backend only, `CATWAF_EDITION=lite npm install` skips the frontend toolchain entirely. The edition lives in `.env`; `catwaf edition` prints it. When touching anything edition-dependent, check both — `test/edition.test.js` exercises the boundary but cannot catch a UI assumption baked into a backend service.
+
+## Project structure
+
+```
+backend/
+  server.js       # thin bootstrap — creates the app, mounts routers, listens
+  routes/         # one file per feature area (waf.js, network.js, catai.js, ...)
+  services/       # shared logic the routes call into (state, db, audit, caddy, ...)
+  services/catai/ # the local assistant — self-contained, deletable as a unit
+  knowledge/      # CatAI's knowledge base (markdown + YAML frontmatter)
+  middleware/     # auth (JWT + request signing + admin/viewer gate), path gate
+frontend/
+  src/pages/      # one file per major page/section
+  src/components/ # shared UI (Sidebar, Header, WelcomeTour, catai/)
+  src/utils/api.js # the signed-request client — all backend calls go through it
+test/             # ten suites — see "Running the tests"
+data/             # SQLite database lives here (gitignored)
+docs/             # setup + feature guides
+setup.sh          # the installer
+```
+
+See [docs/architecture.md](docs/architecture.md) for what each service does.
+
+## Running the tests
+
+```bash
+npm test              # the nine core suites
+npm run test:frontend # adds the Playwright smoke test (needs a browser)
+npm run test:all      # everything
+```
+
+Individually — all fast, none need network:
+
+```bash
+node --experimental-sqlite test/security.test.js   #  25 checks — request signing, replay, tampering
+node --experimental-sqlite test/attack.test.js     # 136 checks — hostile input across every route
+node --experimental-sqlite test/catai.test.js      #  66 checks — retrieval, extraction, action safety
+node --experimental-sqlite test/platform.test.js   # 105 checks — packaging, platform assumptions
+node --experimental-sqlite test/waftools.test.js   # 167 checks — rules, modes, snapshots, simulate
+node --experimental-sqlite test/edition.test.js    # 164 checks — editions, CLI, docker, GeoIP, setup.sh
+node --experimental-sqlite test/subdomain.test.js  #  38 checks — rotating path segment, decoy responses
+node --experimental-sqlite test/waf-e2e.test.js    #  35 checks — real Coraza blocking end to end
+node --experimental-sqlite test/sfl-e2e.test.js    #  39 checks — real sensitive-file blocking, SFL1-4 cumulative
+node --experimental-sqlite test/frontend-smoke.test.js  # 27 checks — dashboard routes in a browser
+```
+
+**802 checks** in total.
+
+Coverage is real but not complete: request signing, CatAI's deterministic half, the WAF
+tooling, the edition model and the CLI surface are well covered; most individual route
+handlers are exercised only indirectly.
+
+Two conventions worth knowing before you add tests:
+
+- **Never assert on fabricated data.** Several suites specifically check that CatWAF
+  reports "no data" rather than inventing it — the Attack Map is the clearest case. If a
+  feature would look better with placeholder values, that is the feature to change.
+- **`test/edition.test.js` cross-checks the CLI against itself**: every command in
+  `catwaf help` must dispatch, and every dispatched command must be documented. Adding a
+  command without help text fails the suite.
+
+## Reporting bugs
+
+Open an issue with:
+- What you expected vs. what happened
+- Steps to reproduce
+- Output of `GET /api/diagnostics/export` if it's a backend issue — it's a sanitized diagnostic dump built exactly for this (no database path, tokens, or secrets included)
+
+## Reporting security issues
+
+Please report security issues privately rather than as a public issue — email agugusgeyehe@gmail.com with what you found, how to reproduce it, and its impact.
+
+## Feature requests
+
+Open an issue describing the problem you're trying to solve, not just the feature you have in mind — the best additions come from a real wall someone hit, not a feature list.
+
+## Code style
+
+For reading the code: nothing is enforced by a linter — 2-space indent, no semicolons-as-religion (the codebase is inconsistent), and small named functions in `services/` over inlining logic in route handlers.

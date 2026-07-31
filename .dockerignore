@@ -1,0 +1,28 @@
+# .dockerignore — keeps build context small and (more importantly) keeps
+# local secrets and dev artifacts out of the image entirely.
+
+node_modules
+frontend/node_modules
+frontend/dist
+.git
+.gitignore
+
+# Local data/logs — these are runtime state, not source; they get created
+# fresh inside the container (or mounted via the compose volumes) instead.
+data
+backend/data
+
+# Never bake real secrets into an image layer.
+.env
+.env.local
+.env.*.local
+
+# Editor/OS noise
+.vscode
+.idea
+.DS_Store
+*.log
+
+# This project's own docs/scripts aren't needed inside the image
+docs
+*.md

@@ -1,0 +1,50 @@
+{
+  "name": "catwaf",
+  "version": "1.0.1",
+  "description": "A web application firewall for your website — Coraza WAF + Caddy + the OWASP Core Rule Set, with a CLI and dashboard on top.",
+  "private": true,
+  "license": "LicenseRef-PolyForm-Internal-Use-1.0.0",
+  "author": "Zachary Yanakiev",
+  "homepage": "https://github.com/agugusgeyehe-dot/catwaf#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agugusgeyehe-dot/catwaf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/agugusgeyehe-dot/catwaf/issues"
+  },
+  "bin": {
+    "catwaf": "./bin/catwaf.js"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:backend": "node --experimental-sqlite backend/server.js",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "start": "node scripts/start.js",
+    "start:backend": "node --experimental-sqlite backend/server.js",
+    "start:caddy": "caddy run --config ./Caddyfile --adapter caddyfile",
+    "build": "npm --prefix frontend run build",
+    "install:all": "npm install && npm --prefix frontend install",
+    "postinstall": "node scripts/postinstall.js",
+    "test": "node --experimental-sqlite test/security.test.js && node --experimental-sqlite test/attack.test.js && node --experimental-sqlite test/catai.test.js && node --experimental-sqlite test/platform.test.js && node --experimental-sqlite test/waftools.test.js && node --experimental-sqlite test/edition.test.js && node --experimental-sqlite test/subdomain.test.js && node --experimental-sqlite test/waf-e2e.test.js && node --experimental-sqlite test/sfl-e2e.test.js",
+    "test:unit": "node --experimental-sqlite test/security.test.js && node --experimental-sqlite test/attack.test.js && node --experimental-sqlite test/catai.test.js && node --experimental-sqlite test/platform.test.js && node --experimental-sqlite test/waftools.test.js && node --experimental-sqlite test/edition.test.js && node --experimental-sqlite test/subdomain.test.js",
+    "test:attack": "node --experimental-sqlite test/attack.test.js",
+    "test:e2e": "node --experimental-sqlite test/waf-e2e.test.js",
+    "test:sfl-e2e": "node --experimental-sqlite test/sfl-e2e.test.js",
+    "test:frontend": "node --experimental-sqlite test/frontend-smoke.test.js",
+    "test:all": "npm run test && npm run test:frontend",
+    "doctor": "node bin/catwaf.js doctor"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "concurrently": "^9.1.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.5.1",
+    "geoip-lite": "^1.4.10",
+    "helmet": "^8.3.0",
+    "js-yaml": "^4.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "swagger-ui-express": "^5.0.1"
+  }
+}

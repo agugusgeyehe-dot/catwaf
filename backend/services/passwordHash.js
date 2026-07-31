@@ -1,0 +1,85 @@
+
+const os = require('os')
+const path = require('path')
+const bcrypt = require('bcryptjs')
+
+const WORKER_PATH = path.join(__dirname, 'passwordHash.worker.js')
+const POOL_SIZE = Math.max(1, Math.min(2, (os.cpus()?.length || 1) - 1))
+const TASK_TIMEOUT_MS = 15000
+
+let pool = null
+let nextWorker = 0
+let seq = 0
+const pending = new Map()
+
+function spawnPool() {
+  if (pool) return pool
+  let Worker
+  try { ({ Worker } = require('worker_threads')) } catch { return null }
+
+  const workers = []
+  for (let i = 0; i < POOL_SIZE; i++) {
+    let w
+    try { w = new Worker(WORKER_PATH) } catch { return null }
+
+    w.on('message', ({ id, value, error }) => {
+      const task = pending.get(id)
+      if (!task) return
+      pending.delete(id)
+      clearTimeout(task.timer)
+      error ? task.reject(new Error(error)) : task.resolve(value)
+    })
+    const onDead = () => {
+      for (const [id, task] of pending) {
+        if (task.worker !== w) continue
+        pending.delete(id)
+        clearTimeout(task.timer)
+        task.reject(new Error('password worker exited'))
+      }
+      pool = null
+    }
+    w.on('error', onDead)
+    w.on('exit', onDead)
+    w.unref()
+    workers.push(w)
+  }
+  pool = workers
+  return pool
+}
+
+function run(message) {
+  const workers = spawnPool()
+  if (!workers || workers.length === 0) {
+    return Promise.resolve(
+      message.op === 'hash'
+        ? bcrypt.hashSync(message.password, message.cost)
+        : bcrypt.compareSync(message.password, message.hash)
+    )
+  }
+
+  const worker = workers[nextWorker++ % workers.length]
+  const id = ++seq
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id)
+      reject(new Error('password hashing timed out'))
+    }, TASK_TIMEOUT_MS)
+    timer.unref?.()
+    pending.set(id, { resolve, reject, timer, worker })
+    worker.postMessage({ id, ...message })
+  })
+}
+
+const asString = v => (typeof v === 'string' ? v : '')
+
+function compare(password, hash) {
+  if (typeof hash !== 'string' || hash.length === 0) return Promise.resolve(false)
+  return run({ op: 'compare', password: asString(password), hash })
+}
+
+function hash(password, cost) {
+  return run({ op: 'hash', password: asString(password), cost })
+}
+
+module.exports = { compare, hash, POOL_SIZE }

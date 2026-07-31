@@ -1,0 +1,33 @@
+# docker/Caddyfile — baked into the Caddy image at build time.
+#
+# The admin API listens on 0.0.0.0:2019 so the backend container can reach
+# it to reload config. It is NOT published to the host in docker-compose.yml,
+# so it stays on the internal compose network only. This is what replaced
+# the old Docker-socket + `docker exec` reload mechanism.
+
+{
+    admin 0.0.0.0:2019
+    order coraza_waf first
+}
+
+# ── Dashboard (control panel UI + API) ───────────────────────────────────
+:80 {
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+    handle /g/* {
+        reverse_proxy backend:8000
+    }
+    handle {
+        root * /srv/dashboard
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# ── Protected test app (this is what CatWAF's WAF actually inspects) ─────
+# Starts with no WAF directives. The first time you apply a WAF setting from
+# the dashboard or CLI, CatWAF inserts and manages its own block here.
+:8081 {
+    reverse_proxy test-app:8080
+}

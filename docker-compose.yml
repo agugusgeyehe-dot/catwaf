@@ -1,0 +1,75 @@
+# docker-compose.yml — the full CatWAF stack: backend API, Caddy (dashboard
+# + WAF), and a local-only test app so the WAF demo has something to protect.
+#
+# Quick start:
+#   cp .env.example .env      # then set JWT_SECRET at minimum
+#   docker compose up --build
+#   open http://localhost                                      (dashboard)
+#   curl "http://localhost:8081/"                              (allowed)
+#   curl "http://localhost:8081/?id=1+UNION+SELECT+1,2,3--"    (blocked)
+#
+# NO DOCKER SOCKET. The backend reloads Caddy over Caddy's own admin API
+# (see CADDY_ADMIN_URL below and backend/services/caddy.js). The admin API
+# is reachable only on the internal compose network — it is deliberately
+# NOT published to the host.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: catwaf-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CADDYFILE_PATH: /etc/caddy/Caddyfile
+      CADDY_ADMIN_URL: http://caddy:2019
+      CORAZA_AUDIT_LOG: /var/log/coraza/audit.json
+    ports:
+      - "8000:8000"
+    volumes:
+      - catwaf-data:/app/data
+      - caddy-config:/etc/caddy
+      - coraza-logs:/var/log/coraza
+    depends_on:
+      - caddy
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    build:
+      context: .
+      dockerfile: docker/Caddy.Dockerfile
+    container_name: catwaf-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"     # dashboard
+      - "8081:8081" # protected test app
+    # Port 2019 (admin API) is intentionally NOT in `ports` — it stays on
+    # the internal network, reachable by the backend service only.
+    volumes:
+      - caddy-config:/etc/caddy
+      - coraza-logs:/var/log/coraza
+    depends_on:
+      - test-app
+    security_opt:
+      - no-new-privileges:true
+
+  # Local-only intentionally-vulnerable test app used to demonstrate that the
+  # WAF actually blocks. It has NO `ports:` entry, so it is not reachable
+  # from the host or the internet — traffic reaches it only through
+  # Caddy + Coraza on :8081.
+  test-app:
+    build:
+      context: .
+      dockerfile: docker/TestApp.Dockerfile
+    container_name: catwaf-test-app
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  catwaf-data:
+  caddy-config:
+  coraza-logs:

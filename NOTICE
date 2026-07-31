@@ -1,0 +1,72 @@
+CatWAF depends on and, in its Docker distribution, bundles a compiled Caddy
+binary built with the Coraza WAF module. Those components are licensed
+separately from CatWAF itself, under the Apache License, Version 2.0.
+
+This NOTICE is required by the Apache License, Version 2.0, Section 4, for
+any distribution that includes those components (in particular, the Docker
+image built from docker/Caddy.Dockerfile).
+
+--------------------------------------------------------------------------
+
+Caddy
+https://github.com/caddyserver/caddy
+Copyright 2015 Matthew Holt and The Caddy Authors
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------
+
+Coraza / coraza-caddy
+https://github.com/corazawaf/coraza
+https://github.com/corazawaf/coraza-caddy
+Copyright the Coraza WAF Authors / Corazawaf
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------
+
+OWASP Core Rule Set (CRS)
+https://github.com/coreruleset/coreruleset
+Copyright the OWASP CRS project and contributors
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------
+
+geoip-lite
+https://github.com/geoip-lite/node-geoip
+Copyright 2011-2018 Philip Tellis and contributors
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+
+geoip-lite is a runtime dependency of CatWAF in both editions. It supplies the
+IP-to-country/city lookup behind the Attack Map and the geographic columns in
+the event log.
+
+--------------------------------------------------------------------------
+
+MaxMind GeoLite
+
+This product includes GeoLite data created by MaxMind, available from
+https://www.maxmind.com
+
+The geographic data used by CatWAF is derived from MaxMind's GeoLite
+databases and is redistributed within the geoip-lite npm package, which
+CatWAF installs as a dependency. CatWAF does not itself redistribute the
+GeoLite data files, and does not claim any ownership of them. MaxMind's
+own licence terms govern that data; see
+https://www.maxmind.com/en/geolite2/eula
+
+Note that the data shipped with geoip-lite is a point-in-time snapshot and
+is not the current GeoLite release. See the geoip-lite documentation for how
+to refresh it. CatWAF reports a location only where the database has one —
+addresses with no entry, and all private, loopback and reserved addresses,
+are recorded and displayed as having no known location rather than being
+given approximate coordinates.
+
+--------------------------------------------------------------------------
+
+Each project's own repository is the authoritative source for its full
+license text, copyright holders, and any NOTICE content it requires be
+reproduced. If any of the above has a separate NOTICE file of its own,
+that file's contents take precedence over the summary here.
