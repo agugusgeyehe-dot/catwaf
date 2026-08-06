@@ -226,13 +226,16 @@ async function collect() {
   for (const [port, info] of Object.entries(env.ports)) {
     if (!info.inUse) continue
     const known = { 80: 'HTTP', 443: 'HTTPS', 2019: 'Caddy admin API', 3000: 'dashboard dev server', 8000: 'CatWAF API', 8081: 'protected app' }[port]
-    r.add(INFO, `Port ${port} is in use${known ? ` (${known})` : ''}`)
+    const owner = info.owner ? ` — held by ${info.owner.command || 'unknown process'}${info.owner.pid ? ` (pid ${info.owner.pid})` : ''}` : ''
+    r.add(INFO, `Port ${port} is in use${known ? ` (${known})` : ''}${owner}`)
   }
 
   const apiPort = Number(process.env.PORT || 8000)
   if (env.ports[apiPort] && env.ports[apiPort].inUse) {
+    const owner = env.ports[apiPort].owner
+    const ownedBy = owner ? ` It is currently held by ${owner.command || 'an unknown process'}${owner.pid ? ` (pid ${owner.pid})` : ''}.` : ''
     r.add(INFO, `CatWAF API port ${apiPort} already has a listener`, null,
-      'That is expected if CatWAF is already running. If it is not, another service owns the port — change PORT or stop the conflicting service.')
+      `That is expected if CatWAF is already running.${ownedBy} If it is not CatWAF, another service owns the port — change PORT or stop the conflicting service.`)
   }
 
   if (!env.existing.frontendBuilt) {

@@ -300,9 +300,40 @@ function checkPort(port, host = '127.0.0.1', timeout = 600) {
   })
 }
 
+// "Something is listening on :8000" is not actionable on its own — the
+// operator still has to go find out what and kill or reconfigure it
+// themselves. `lsof` (or `fuser` where lsof is not installed) can name the
+// process directly, so doctor's port report does it for them. Best-effort
+// only: a locked-down host may have neither tool, or may deny an
+// unprivileged CatWAF permission to see other users' sockets — in that case
+// this quietly reports nothing rather than failing the whole check.
+function portOwner(port) {
+  try {
+    const out = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString()
+    const line = out.split('\n').find(l => /LISTEN/.test(l))
+    if (line) {
+      const cols = line.trim().split(/\s+/)
+      if (cols[0] && cols[1]) return { command: cols[0], pid: Number(cols[1]) || null }
+    }
+  } catch {}
+  try {
+    const out = execFileSync('fuser', ['-n', 'tcp', String(port)], { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString()
+    const pid = Number(out.trim().split(/\s+/)[0])
+    if (Number.isFinite(pid)) {
+      let command = null
+      try { command = execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() || null } catch {}
+      return { command, pid }
+    }
+  } catch {}
+  return null
+}
+
 async function detectPorts(ports = [80, 443, 2019, 3000, 8000, 8081]) {
   const out = {}
-  await Promise.all(ports.map(async p => { out[p] = { inUse: await checkPort(p) } }))
+  await Promise.all(ports.map(async p => {
+    const inUse = await checkPort(p)
+    out[p] = { inUse, owner: inUse ? portOwner(p) : null }
+  }))
   return out
 }
 
