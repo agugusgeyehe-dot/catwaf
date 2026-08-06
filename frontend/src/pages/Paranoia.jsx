@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertTriangle, Shield, ShieldAlert, ShieldCheck, ShieldX } from 'lucide-react'
-import { Card, SectionTitle, Toggle, ActionBar, Toast } from '../components/ui.jsx'
+import { SectionTitle, ActionBar, Toast } from '../components/ui.jsx'
 import { api } from '../utils/api.js'
 
 const PL_INFO = [

@@ -244,7 +244,13 @@ Control panels regenerate their own vhosts, so a file written underneath them wo
 
 **Protection** — Engine on / off / detection-only, Paranoia Levels 1–4, and per-category OWASP rules (SQL injection, XSS, PHP injection, path traversal, scanner detection, and more).
 
-**Access control** — IP allow/block lists with expiry, and country-level geo blocking.
+**Access control** — IP allow/block lists with expiry, country-level geo blocking, method allowlists, basic auth, client certificates, and a switch to refuse any request whose `Host` isn't one of yours — the mechanical fix for [origin exposure](docs/protection.md#why-a-feature-might-not-be-doing-anything).
+
+**Client reputation** — The rule engine asks *is this request malicious?*; this layer asks *should this client be here at all?* A challenge gate (cookie, JavaScript proof-of-work, a self-hosted captcha, or reCAPTCHA/hCaptcha/Turnstile/mCaptcha), behavioural banning, ASN and forward-confirmed reverse-DNS rules, DNSBLs and subscribed community blocklists. Every feature that stops an address writes to [one ban store](docs/protection.md#active-bans), so "why is this visitor blocked" has a single answer. All of it is off by default. See [the protection guide](docs/protection.md).
+
+**Configuration** — Around 290 settings across 38 groups — TLS and certificates, reverse-proxy behaviour, response headers, CORS, compression, caching, generated `robots.txt` and `security.txt` — reachable from the dashboard, `catwaf settings`, or the API, all through the same validation. Every change can be [previewed as a Caddyfile diff](docs/cli.md#catwaf-settings) before it applies, and is validated by Caddy and rolled back if it wouldn't load. See the [settings reference](docs/settings.md).
+
+**Operations** — One scheduler for every timed task, backups, configuration templates, CSV and printable reports, a [Prometheus endpoint](docs/metrics.md), and two-factor admin login. `catwaf doctor` reports what the installed Caddy build can actually do, and names anything you've switched on that couldn't be rendered because of a missing module — so an enabled feature is never a silent no-op.
 
 **Sensitive files** — Five graduated levels (SFL 0–4) that block access to config files, backups, and version-control directories, plus a scanner that walks your real webroot and shows what's publicly reachable.
 
@@ -424,6 +430,11 @@ largest single component of a Lite install — see
 - [Cloudflare](docs/cloudflare.md) — the wizard and origin locking
 - [Rules](docs/rules.md) — paranoia levels and rule categories
 - [CLI reference](docs/cli.md) — every command, flag and exit code
+- [Settings reference](docs/settings.md) — every setting, its type and its default
+- [Protection layer](docs/protection.md) — bans, the challenge gate and threat intelligence
+- [TLS and certificates](docs/tls.md) — certificate sources, ACME, wildcards, mTLS
+- [Metrics](docs/metrics.md) — the Prometheus endpoint and what to alert on
+- [Plugins](docs/plugins.md) — the data-only extension contract
 - [CatAI](docs/catai.md) — the local assistant: setup, what it can do, and how it's kept safe
 - [Architecture](docs/architecture.md) — how the code is organized, and the real request path
 - [Screenshots](docs/screenshots/README.md) — what still needs capturing

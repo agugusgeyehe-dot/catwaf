@@ -46,6 +46,7 @@ ${c('Getting started', C.bold)}
   setup              First-run wizard (interactive, or --lite / --full)
   doctor             Diagnose this environment; exits non-zero if unhealthy
   provision          Configure your web server to serve the dashboard
+  auto               Discover running web apps and protect them automatically
 
 ${c('Operations', C.bold)}
   explain            Explain why a request was blocked
@@ -58,6 +59,16 @@ ${c('Operations', C.bold)}
   health             Component health; exits non-zero when degraded
   security-test      Assess CatWAF's own security posture
   diff               What changed since the last snapshot
+
+${c('Protection & configuration', C.bold)}
+  settings [group]   Show or change any settings group (--preview, --reset)
+  bans <sub>         Active bans (list, add, lift, clear)
+  template <sub>     Configuration templates (list, save, apply, remove)
+  jobs <sub>         Scheduled jobs (list, run)
+  cache <sub>        Cached lookups (list, clear, refresh)
+  backup <sub>       Backups (now, list, verify)
+  report             Export activity over a date range
+  2fa <sub>          Two-factor login (status, enroll, confirm, disable, codes)
 
 ${c('Service', C.bold)}
   start              Start CatWAF
@@ -174,6 +185,36 @@ ${c('Exit codes', C.bold)}
   2                  Doctor itself could not run
 `,
 
+  auto: `
+${c('catwaf auto', C.bold)} — discover and protect web apps automatically
+
+Detects Docker, enumerates running containers, and identifies which ones are
+web applications (PHP/nginx/Apache, Node.js, Python, static) using multiple
+signals — image name, running processes, filesystem probes, HTTP headers and
+body fingerprints, and container labels/env — combined into a confidence
+score rather than trusted individually.
+
+For each web application found, CatWAF generates a protected reverse-proxy
+route (Client → CatWAF → Coraza/OWASP CRS → app), validates it with
+\`caddy validate\`, backs up the previous Caddyfile, and applies it atomically.
+If validation fails, nothing is written and the previous configuration is
+kept untouched.
+
+${c('Usage:', C.bold)} catwaf auto [--dry-run] [--verbose] [--json]
+
+  --dry-run          Discover and show what would happen; change nothing
+  --verbose          Show routing caveats (network reachability, port reuse)
+  --json             Machine-readable output
+
+Upstreams prefer the container/compose-service name over its IP (IPs churn
+across restarts); a published host port is used only as a fallback, and is
+always flagged as bypassing the WAF directly. CatWAF never modifies or stops
+a discovered container.
+
+If Docker isn't available, this command fails gracefully and exits non-zero;
+it does not fall back to guessing at non-Docker deployments.
+`,
+
   provision: `
 ${c('catwaf provision', C.bold)} — serve the dashboard at catwaf.<your-domain>
 
@@ -224,15 +265,36 @@ ${c('Usage:', C.bold)} catwaf status
 `,
 
   start: `
-${c('catwaf start', C.bold)} — start CatWAF
+${c('catwaf start', C.bold)} — start CatWAF and protect your applications
 
-Uses systemd when a catwaf.service unit exists and systemd is running;
-otherwise starts a detached background process and records its PID.
+This is the "put my website behind CatWAF" command. It starts the service,
+then discovers running web applications, places the WAF in front of them,
+and ${c('proves', C.bold)} the protection with real traffic before reporting success.
 
-Idempotent: starting an already-running CatWAF reports that and does not
-create a second process.
+${c('Usage:', C.bold)} catwaf start [--no-auto] [--no-verify] [--verbose] [--json]
 
-${c('Usage:', C.bold)} catwaf start
+  --no-auto          Start the service only; do not discover or protect
+  --no-verify        Apply routes without the live protection self-test
+  --verbose          Show routing caveats
+  --json             Machine-readable output
+
+${c('What it does', C.bold)}
+  1. Starts CatWAF (systemd when available, otherwise a background process)
+  2. Discovers running web applications (see ${c('catwaf help auto', C.cyan)})
+  3. Attaches CatWAF's proxy to the app's Docker network so it can reach it
+  4. Generates routes that send traffic through Coraza + OWASP CRS first
+  5. Validates the whole configuration, backs it up, applies it atomically
+  6. Reloads the proxy
+  7. Sends a benign request and a CRS test payload to its own endpoint and
+     confirms the first is served and the second is blocked
+
+A route is reported ${c('protected', C.green)} only if step 7 passes. If traffic does not
+actually traverse the WAF, CatWAF says so and exits non-zero — a generated
+configuration is never treated as evidence of protection.
+
+Idempotent: re-running regenerates CatWAF's own managed region only, keeps
+listen ports stable, leaves unrelated configuration untouched, and handles
+containers that restarted, changed network, or disappeared.
 `,
 
   stop: `
@@ -487,6 +549,137 @@ ${c('Usage:', C.bold)} catwaf uninstall [--yes] [--purge-data]
   --yes              Do not prompt for confirmation
   --purge-data       Also delete the database and logs (asks unless --yes)
 `,
+
+  settings: `
+${c('catwaf settings', C.bold, C.cyan)} — show or change any settings group
+
+Every switch the dashboard exposes is reachable here, from the same schema,
+with the same validation. A change is written, rendered into the Caddyfile,
+validated by Caddy and only then applied — if the result would not load, the
+previous configuration is kept.
+
+${c('Usage:', C.bold)}
+  catwaf settings                          List every group
+  catwaf settings <group>                  Show one group's current values
+  catwaf settings <group> --verbose        …with the help text for each field
+  catwaf settings <group> field=value ...  Change one or more fields
+  catwaf settings <group> --preview f=v    Show the Caddyfile diff, apply nothing
+  catwaf settings <group> --reset          Restore this group's defaults
+
+${c('Values', C.bold)}
+  Switches take true/false (also yes/no, on/off, 1/0).
+  Lists take a comma- or space-separated string: ${c('methods=GET,POST,HEAD', C.dim)}
+  Fields holding structured rows are refused here — use the dashboard or a
+  template, so a half-expressed row cannot be written.
+
+${c('Examples', C.bold)}
+  catwaf settings access reject_unknown_host=true
+  catwaf settings challenge --preview mode=suspicious
+  catwaf settings backups destination=/var/backups/catwaf enabled=true
+`,
+
+  bans: `
+${c('catwaf bans', C.bold, C.cyan)} — addresses CatWAF is currently refusing
+
+Shows the unified ban store: behavioural banning, DNSBL hits, the challenge
+gate, community lists and the threat feed all write here. Your manual IP
+blocklist is separate and is never changed by these commands.
+
+${c('Usage:', C.bold)}
+  catwaf bans [list]                       Show active bans
+  catwaf bans list --source bad_behavior   Only bans from one source
+  catwaf bans list --include-expired       Include bans that have lapsed
+  catwaf bans add <ip|cidr> [--minutes N]  Ban by hand (omit --minutes = forever)
+  catwaf bans add <ip> --reason "..."      With a note
+  catwaf bans lift <ip|cidr>               Unban
+  catwaf bans clear [--yes]                Lift every automatic ban
+`,
+
+  template: `
+${c('catwaf template', C.bold, C.cyan)} — save and apply whole configurations
+
+A template is a set of settings captured together. Applying one rewrites
+several groups at once, so ${c('apply', C.cyan)} always prints the diff and asks
+before doing anything.
+
+${c('Usage:', C.bold)}
+  catwaf template [list]             Built-in and saved templates
+  catwaf template show <id>          Print a template as JSON
+  catwaf template save "<name>"      Capture the current configuration
+  catwaf template apply <id>         Show the diff, then apply on confirmation
+  catwaf template apply <id> --dry-run   Show the diff and stop
+  catwaf template remove <id>        Delete a saved template
+`,
+
+  report: `
+${c('catwaf report', C.bold, C.cyan)} — export activity over a date range
+
+${c('Usage:', C.bold)}
+  catwaf report --from 2026-01-01 --to 2026-02-01 [--format csv]
+  catwaf report --format html --out /tmp/january.html
+  catwaf report --format json
+
+${c('Formats', C.bold)}
+  csv          Summary totals, categories, top addresses (default)
+  events-csv   One row per logged request in the range
+  html         Printable report
+  json         The whole report as structured data
+
+Without --out the report is written to stdout, so it pipes.
+`,
+
+  jobs: `
+${c('catwaf jobs', C.bold, C.cyan)} — everything CatWAF runs on a timer
+
+One scheduler drives list refreshes, ban expiry, backups, certificate checks
+and telemetry. A job whose feature is switched off is listed but never
+scheduled, which makes this the answer to "is that actually running?".
+
+${c('Usage:', C.bold)}
+  catwaf jobs [list]                 Show every job, its interval and last run
+  catwaf jobs run <name>             Run one now, regardless of its schedule
+`,
+
+  backup: `
+${c('catwaf backup', C.bold, C.cyan)} — configuration and history snapshots
+
+${c('Usage:', C.bold)}
+  catwaf backup [list]               Show stored backups
+  catwaf backup now                  Write one now
+  catwaf backup now --dry-run        Show what would be written
+  catwaf backup verify               Check the destination is writable
+
+Set the destination first: ${c('catwaf settings backups destination=/var/backups/catwaf', C.dim)}
+`,
+
+  cache: `
+${c('catwaf cache', C.bold, C.cyan)} — what CatWAF is holding on to
+
+Every namespace here is rebuildable, so clearing one is safe. The cost is
+that the next request needing that data pays for the lookup again.
+
+${c('Usage:', C.bold)}
+  catwaf cache [list]                Namespaces, entry counts and sizes
+  catwaf cache clear <namespace>     Empty one ("all" empties every namespace)
+  catwaf cache refresh <namespace>   Rebuild one now
+`,
+
+  '2fa': `
+${c('catwaf 2fa', C.bold, C.cyan)} — two-factor login for an admin account
+
+Enrollment is two steps on purpose: nothing is enforced until a working code
+proves the authenticator app is set up, because enrolling without that check
+is how people lock themselves out.
+
+${c('Usage:', C.bold)}
+  catwaf 2fa [status] [--user <u>]   Whether it is enabled, and codes remaining
+  catwaf 2fa enroll --user <u>       Generate a secret and otpauth:// URI
+  catwaf 2fa confirm <code> --user <u>   Prove it works; prints recovery codes
+  catwaf 2fa disable --user <u>      Turn it off (asks unless --yes)
+  catwaf 2fa codes --user <u>        New recovery codes; the old set stops working
+
+--user may be omitted when there is exactly one admin account.
+`,
 }
 
 function printHelp(topic) {
@@ -528,7 +721,7 @@ async function cmdSetup(flags) {
   return typeof code === 'number' ? code : 0
 }
 
-function cmdStart() {
+async function cmdStart(flags = {}) {
   const edition = editionSvc()
   const svc = require(path.join(PROJECT_ROOT, 'src', 'tui', 'service.js'))
 
@@ -544,21 +737,62 @@ function cmdStart() {
     }
     console.log(`${c('✓', C.green)} CatWAF Lite started — WAF active via ${r.manager}${r.pid ? c(` (pid ${r.pid})`, C.dim) : ''}`)
     console.log(c('  No API server or dashboard in Lite. Use `catwaf audit` / `catwaf status`.', C.dim))
-    return 0
+    return await autoProtectAfterStart(flags)
   }
 
   const r = svc.start()
   if (r.alreadyRunning) {
     console.log(`${c('•', C.yellow)} ${r.message}${r.pid ? c(` (pid ${r.pid})`, C.dim) : ''}`)
-    return 0
+    console.log(c(`  Dashboard: ${svc.dashboardUrl()}`, C.dim))
+    // Still re-run protection: containers may have been recreated, moved
+    // network, or disappeared since CatWAF was started. This is idempotent.
+    return await autoProtectAfterStart(flags)
   }
   if (!r.ok) {
     console.error(`${c('✗', C.red)} Could not start CatWAF: ${r.error}`)
     return EXIT.FAILURE
   }
+
+  // Spawning is not starting. Wait for the API to actually answer before
+  // telling anyone it is up — otherwise the next thing they see is the
+  // dashboard failing to connect, with nothing to explain why.
+  const ready = await svc.waitUntilReady(20000, { pid: r.pid })
+  if (!ready.ok) {
+    console.error(`${c('✗', C.red)} CatWAF was started but its API is not answering.`)
+    console.error(c(`  ${ready.error}`, C.yellow))
+    if (ready.log) {
+      console.error(c('\n  Last lines of the CatWAF log:', C.dim))
+      for (const line of ready.log.split('\n')) console.error(c(`    ${line}`, C.dim))
+    }
+    console.error(c(`\n  Full log: ${svc.logFile()}`, C.dim))
+    console.error(c('  Common causes: the port is already in use, the database directory is not', C.dim))
+    console.error(c('  writable, or JWT_SECRET is missing. `catwaf doctor` checks all three.', C.dim))
+    return EXIT.FAILURE
+  }
+
   console.log(`${c('✓', C.green)} CatWAF started via ${r.manager}${r.pid ? c(` (pid ${r.pid})`, C.dim) : ''}`)
+  console.log(`  Dashboard: ${c(ready.url, C.cyan)}`)
   if (r.logFile) console.log(c(`  Logs: ${r.logFile}`, C.dim))
-  return 0
+  return await autoProtectAfterStart(flags)
+}
+
+// `catwaf start` is the "put my website behind CatWAF" command: after the
+// service is up it discovers running applications and actually places the
+// WAF in front of them, then proves it with real traffic. Opt out with
+// --no-auto. Never reports a site as protected on the strength of a
+// generated config alone.
+async function autoProtectAfterStart(flags) {
+  if (flags['no-auto']) {
+    console.log(c('  Auto-protection skipped (--no-auto). Run `catwaf auto` to protect discovered apps.', C.dim))
+    return 0
+  }
+  try {
+    return await ext().cmdStartProtect(flags)
+  } catch (e) {
+    console.error(c(`  Auto-protection could not run: ${e.message}`, C.yellow))
+    console.error(c('  CatWAF itself is running. Run `catwaf auto` to retry protection.', C.dim))
+    return 0
+  }
 }
 
 async function cmdStop() {
@@ -574,7 +808,18 @@ async function cmdRestart() {
   const svc = require(path.join(PROJECT_ROOT, 'src', 'tui', 'service.js'))
   const r = await svc.restart()
   if (!r.ok) { console.error(`${c('✗', C.red)} Restart failed during ${r.phase}: ${r.error}`); return 1 }
+
+  // Same reason as `catwaf start`: a restart that spawns and immediately dies
+  // must not be reported as a restart that worked.
+  const ready = await svc.waitUntilReady(20000, { pid: r.pid })
+  if (!ready.ok) {
+    console.error(`${c('✗', C.red)} CatWAF restarted but its API is not answering.`)
+    console.error(c(`  ${ready.error}`, C.yellow))
+    if (ready.log) for (const line of ready.log.split('\n')) console.error(c(`    ${line}`, C.dim))
+    return 1
+  }
   console.log(`${c('✓', C.green)} CatWAF restarted via ${r.manager}${r.pid ? c(` (pid ${r.pid})`, C.dim) : ''}`)
+  console.log(`  Dashboard: ${c(ready.url, C.cyan)}`)
   return 0
 }
 
@@ -995,7 +1240,7 @@ async function main() {
     case 'status': return await cmdStatus()
     case 'setup':
     case 'install': return await cmdSetup(flags)
-    case 'start': return cmdStart()
+    case 'start': return await cmdStart(flags)
     case 'stop': return await cmdStop()
     case 'restart': return await cmdRestart()
     case 'logs': return await cmdLogs(flags)
@@ -1017,7 +1262,22 @@ async function main() {
     case 'health': return await ext().cmdHealth(flags)
     case 'security-test': return await ext().cmdSecurityTest(flags)
     case 'diff': return await ext().cmdDiff(flags)
+    case 'settings': return await ext().cmdSettings(rest, flags)
+    case 'bans':
+    case 'ban': return await ext().cmdBans(rest, flags)
+    case 'template':
+    case 'templates': return await ext().cmdTemplate(rest, flags)
+    case 'report':
+    case 'reports': return await ext().cmdReport(rest, flags)
+    case 'jobs':
+    case 'job': return await ext().cmdJobs(rest, flags)
+    case 'backup':
+    case 'backups': return await ext().cmdBackup(rest, flags)
+    case 'cache':
+    case 'caches': return await ext().cmdCache(rest, flags)
+    case '2fa': return await ext().cmdTwoFactor(rest, flags)
     case 'provision': return await cmdProvision(flags)
+    case 'auto': return await ext().cmdAuto(flags)
     case 'uninstall': return await cmdUninstall(flags)
     default:
       console.error(c(`Unknown command: ${command}`, C.red))

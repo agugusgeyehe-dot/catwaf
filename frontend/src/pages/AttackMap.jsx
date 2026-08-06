@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Globe2, RotateCcw, Pause, Play, AlertTriangle, ShieldAlert, ChevronRight, Box, Square, X } from 'lucide-react'
 import { api } from '../utils/api.js'
 import { usePreferences } from '../utils/preferences.jsx'

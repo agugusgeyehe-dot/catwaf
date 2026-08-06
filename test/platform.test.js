@@ -250,7 +250,6 @@ const auth = require(path.join(ROOT, 'backend/middleware/auth.js'))
   }
 
   section('schema migration rejects unsafe identifiers')
-  const dbSvc = require(path.join(ROOT, 'backend/services/db.js'))
   const dbSource = fs.readFileSync(path.join(ROOT, 'backend/services/db.js'), 'utf8')
   check('migration validates table identifiers', /SAFE_IDENTIFIER\.test\(table\)/.test(dbSource))
   check('migration validates column identifiers', /SAFE_IDENTIFIER\.test\(name\)/.test(dbSource))

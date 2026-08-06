@@ -78,9 +78,11 @@ async function collect() {
       writable ? null : 'WAF changes will fail. Run as a user that can write it, or set CADDYFILE_PATH.')
 
     const body = fs.readFileSync(cfPath, 'utf8')
-    const hasBlock = body.includes('@@CATWAF_WAF_START@@')
-    const hasOrder = /order\s+coraza_waf\s+first/.test(body)
-    const intercepting = hasBlock && hasOrder && state.WAF.engine !== 'Off'
+const hasBlock = body.includes('@@CATWAF_WAF_START@@')
+const hasAutoBlock = body.includes('@@CATWAF_AUTO_START@@') && /@@CATWAF_AUTO_START@@[\s\S]*?coraza_waf/.test(body)
+const hasCoraza = /(^|\n)\s*coraza_waf\s*\{/.test(body)
+const hasOrder = /order\s+coraza_waf\s+first/.test(body)
+const intercepting = (hasBlock || hasAutoBlock || hasCoraza) && hasOrder && state.WAF.engine !== 'Off'
     add('WAF interception', intercepting ? HEALTHY : (hasBlock ? DEGRADED : UNHEALTHY),
       !hasBlock ? 'no CatWAF WAF block in the Caddyfile'
         : !hasOrder ? 'missing `order coraza_waf first` — requests can bypass Coraza'

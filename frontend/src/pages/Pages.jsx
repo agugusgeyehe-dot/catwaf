@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertCircle, Globe, Check, Trash2, Plus } from 'lucide-react'
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts'
 import { Toggle, SectionTitle, ActionBar, Input, Toast, EmptyState } from '../components/ui.jsx'

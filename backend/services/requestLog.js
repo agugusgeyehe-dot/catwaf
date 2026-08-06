@@ -8,6 +8,14 @@ const geoip = require('./geoip')
 const now = () => new Date().toISOString()
 const rid = (n = 8) => crypto.randomBytes(n).toString('hex')
 
+// Identity of an audit entry. Prefer Coraza's own transaction id; fall back
+// to a hash of the raw line so identity is still deterministic.
+function auditEntryId(tx, rawLine) {
+  const txId = tx?.id || tx?.Id
+  if (typeof txId === 'string' && /^[A-Za-z0-9_.-]{4,64}$/.test(txId)) return txId
+  return crypto.createHash('sha1').update(String(rawLine || '')).digest('hex').slice(0, 16)
+}
+
 const RULE_ID_CATEGORY = [
   [913000, 913999, 'Scanner Detection'],
   [930000, 930999, 'LFI'],
@@ -138,7 +146,11 @@ function parseAuditEntry(raw) {
   const geo = geoip.lookup(ip)
 
   return {
-    id: rid(6),
+    // Stable, content-derived id so re-reading the same audit entry can
+    // never create a duplicate row (INSERT OR IGNORE relies on this).
+    // Coraza assigns every transaction an id; the hash is the fallback for
+    // producers that do not.
+    id: auditEntryId(tx, raw),
     ts: corazaTimestampToIso(tx),
     ip,
     method: tx.request?.method || tx.Request?.method || null,
@@ -167,29 +179,113 @@ function insertRow(row) {
   `).run(row.id, row.ts, row.ip, row.method, row.uri, row.status, row.action, row.attack_type, row.rule_ids, row.score, row.user_agent, row.severity, row.reason, row.matched_var, row.country_code, row.city, row.lat, row.lon)
 }
 
-let lastReadOffset = 0
+// How far into the audit log we have already read.
+//
+// This is persisted, not just held in memory: the API server is not the only
+// reader — `catwaf audit` and friends ingest too, and each CLI invocation is
+// a fresh process. With an in-memory-only offset every CLI run restarted at
+// zero and re-ingested the entire log.
+const OFFSET_KEY = 'audit_log_offset'
 
-function ingestNewEntries() {
+// One read is capped so a large or long-unread audit log cannot be pulled
+// into memory in a single allocation. Whatever is left is picked up on the
+// next call.
+const MAX_READ_BYTES = 8 * 1024 * 1024
+
+let lastReadOffset = null
+
+function loadOffset(path, size) {
+  if (lastReadOffset !== null) return lastReadOffset
+  try {
+    const saved = db.getState(OFFSET_KEY)
+    // Tied to the path it was recorded for: the effective audit log can move
+    // (see caddy.js audit-log resolution), and an offset from a different
+    // file is meaningless.
+    if (saved && saved.path === path && Number.isFinite(saved.offset)) {
+      lastReadOffset = Math.min(saved.offset, size)
+      return lastReadOffset
+    }
+  } catch { /* fall through to a cold start */ }
+  lastReadOffset = 0
+  return lastReadOffset
+}
+
+function saveOffset(path, offset) {
+  lastReadOffset = offset
+  try { db.setState(OFFSET_KEY, { path, offset }) } catch { /* best effort */ }
+}
+
+// Reads one bounded chunk of `filePath` starting at `offset`. Returns how
+// many rows were ingested and the offset consumed up to. Never advances past
+// a partially written line.
+function ingestChunk(filePath, offset) {
   let stat
-  try { stat = fs.statSync(caddySvc.AUDIT_LOG_PATH) } catch { return { ingested: 0, reason: 'audit log not found (Coraza not running or SecAuditEngine off)' } }
+  try { stat = fs.statSync(filePath) } catch { return { ingested: 0, consumedTo: offset, missing: true } }
 
-  if (stat.size < lastReadOffset) lastReadOffset = 0
-  if (stat.size === lastReadOffset) return { ingested: 0 }
+  let from = offset
+  // Truncated or replaced underneath us — start over. Entry ids are derived
+  // from content (see parseAuditEntry), so re-reading cannot duplicate rows.
+  if (stat.size < from) from = 0
+  if (stat.size === from) return { ingested: 0, consumedTo: from, eof: true }
 
-  const fd = fs.openSync(caddySvc.AUDIT_LOG_PATH, 'r')
-  const length = stat.size - lastReadOffset
+  const length = Math.min(stat.size - from, MAX_READ_BYTES)
   const buf = Buffer.alloc(length)
-  fs.readSync(fd, buf, 0, length, lastReadOffset)
-  fs.closeSync(fd)
-  lastReadOffset = stat.size
 
-  const lines = buf.toString('utf8').split('\n').filter(Boolean)
+  let read = 0
+  const fd = fs.openSync(filePath, 'r')
+  try {
+    read = fs.readSync(fd, buf, 0, length, from)
+  } finally {
+    // Always closed, even if the read throws — this leaked a descriptor on
+    // every failure before.
+    fs.closeSync(fd)
+  }
+
+  const chunk = buf.toString('utf8', 0, read)
+
+  // Coraza may be mid-write, so the final line can be incomplete. Consume
+  // only up to the last newline and leave the remainder for the next pass;
+  // otherwise a partially written entry is skipped and never seen again.
+  const lastNewline = chunk.lastIndexOf('\n')
+  const consumable = lastNewline === -1 ? '' : chunk.slice(0, lastNewline + 1)
+  if (!consumable) return { ingested: 0, consumedTo: from, partial: true }
+
   let ingested = 0
-  for (const line of lines) {
+  for (const line of consumable.split('\n')) {
+    if (!line.trim()) continue
     const row = parseAuditEntry(line)
     if (row) { insertRow(row); ingested++ }
   }
-  return { ingested }
+
+  const consumedTo = from + Buffer.byteLength(consumable, 'utf8')
+  return { ingested, consumedTo, eof: consumedTo >= stat.size }
+}
+
+function ingestNewEntries() {
+  const filePath = caddySvc.AUDIT_LOG_PATH
+  let size
+  try { size = fs.statSync(filePath).size } catch { return { ingested: 0, reason: 'audit log not found (Coraza not running or SecAuditEngine off)' } }
+
+  const offset = loadOffset(filePath, size)
+  const r = ingestChunk(filePath, offset)
+  if (r.missing) return { ingested: 0, reason: 'audit log not found' }
+  if (r.consumedTo !== offset) saveOffset(filePath, r.consumedTo)
+  return { ingested: r.ingested }
+}
+
+// Drains a file that no longer has a writer (a rotated-away audit log),
+// reading it to EOF rather than one capped chunk. Safe to call repeatedly:
+// deterministic row ids mean re-reading cannot duplicate anything.
+function drainFile(filePath) {
+  let total = 0
+  let offset = 0
+  for (let i = 0; i < 10000; i++) {
+    const r = ingestChunk(filePath, offset)
+    total += r.ingested
+    if (r.missing || r.partial || r.eof || r.consumedTo === offset) break
+    offset = r.consumedTo
+  }
+  return { ingested: total }
 }
 
 function getRecent(limit = 50) {
@@ -360,5 +456,10 @@ module.exports = {
   parseAuditEntry, ingestNewEntries, getRecent, getCounts, getAttackTypeCounts, hasAnyData,
   purgeOldEntries, getById, getLatest, query, summarize, parseWindow, getAttackMapPoints,
   classifyRuleIds, categoryOfRuleId,
-  _resetOffsetForTests: () => { lastReadOffset = 0 },
+  ingestChunk,
+  drainFile,
+  _resetOffsetForTests: () => {
+    lastReadOffset = 0
+    try { db.setState(OFFSET_KEY, { path: null, offset: 0 }) } catch {}
+  },
 }

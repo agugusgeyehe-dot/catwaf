@@ -12,6 +12,10 @@ process.env.DB_DIR = path.join(WORK, 'db')
 process.env.CADDYFILE_PATH = path.join(WORK, 'Caddyfile')
 process.env.CORAZA_AUDIT_LOG = path.join(WORK, 'logs', 'audit.json')
 process.env.JWT_SECRET = 't'.repeat(64)
+// Never let a reload reach a Caddy the developer is running locally:
+// `caddy reload` targets CADDY_ADMIN_URL, which defaults to :2019.
+process.env.CADDY_ADMIN_URL = 'http://127.0.0.1:19918'
+
 fs.mkdirSync(process.env.DB_DIR, { recursive: true })
 fs.mkdirSync(path.join(WORK, 'logs'), { recursive: true })
 

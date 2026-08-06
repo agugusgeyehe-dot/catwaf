@@ -58,6 +58,10 @@ function snapshotWaf() {
   return JSON.parse(JSON.stringify({
     WAF: state.WAF,
     RULE_CATEGORIES: state.RULE_CATEGORIES,
+    // The extended settings groups (services/settings) render into the same
+    // Caddyfile, so a rollback that restored only state.WAF would leave a
+    // half-applied configuration behind.
+    SETTINGS: state.settings.snapshot(),
   }))
 }
 
@@ -66,11 +70,20 @@ function restoreWaf(snap) {
   Object.assign(state.WAF, snap.WAF)
   for (const key of Object.keys(state.RULE_CATEGORIES)) delete state.RULE_CATEGORIES[key]
   Object.assign(state.RULE_CATEGORIES, snap.RULE_CATEGORIES)
+  if (snap.SETTINGS) state.settings.restore(snap.SETTINGS)
   db.setState('waf', state.WAF)
   db.setState('rule_categories', state.RULE_CATEGORIES)
 }
 
 function apply({ label, req = null, mutate, validate = null, reload = true }) {
+  // Coraza opens SecAuditLog when the config is provisioned, so the audit
+  // log has to exist before `caddy validate` runs — otherwise every WAF
+  // change fails on a clean install. Idempotent.
+  const auditLog = caddySvc.ensureAuditLog()
+  if (!auditLog.ok) {
+    return { ok: false, phase: 'audit-log', error: auditLog.error }
+  }
+
   const before = snapshotWaf()
   const caddyfilePath = caddySvc.CADDYFILE_PATH
   const hadCaddyfile = fs.existsSync(caddyfilePath)

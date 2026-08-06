@@ -60,6 +60,12 @@ const state = {
 
   DEFAULT_WAF, DEFAULT_RULE_CATEGORIES,
 
+  // Everything added after the original flat WAF blob lives in its own
+  // validated, per-group namespace (services/settings). Exposed here so
+  // renderers and the transaction pipeline reach all configuration through
+  // one object, and so a group participates in snapshot/rollback for free.
+  settings: require('./settings'),
+
   saveWAF(skipCaddy = false) {
     db.setState('waf', state.WAF)
     if (!skipCaddy) {
@@ -76,6 +82,7 @@ const state = {
   reloadAllFromDb() {
     Object.assign(state.WAF, loadWAF())
     Object.assign(state.RULE_CATEGORIES, loadRuleCategories())
+    state.settings.reloadAllFromDb()
   },
 }
 

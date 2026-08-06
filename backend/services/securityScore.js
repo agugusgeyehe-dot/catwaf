@@ -2,13 +2,36 @@
 const state = require('./state')
 const cloudflareSvc = require('./cloudflare')
 const db = require('./db')
+const settings = require('./settings')
 const { needsBootstrap } = require('../middleware/auth')
 
 const STATUS_CREDIT = { pass: 1, warn: 0.5, fail: 0, unknown: null }
 
-function hasHeaderRule(name) {
-  const rules = state.WAF.header_rules || []
-  return rules.some(h => (h?.name || '').toLowerCase() === name.toLowerCase())
+// The score used to be unable to reward header hygiene at all, because
+// CatWAF did not manage headers — the only signal was a hand-written
+// header_rules entry. Now the header policy (idea #34) is real state, so
+// each header is scored from whichever source actually sets it.
+function headerSetBy(name) {
+  const legacy = (state.WAF.header_rules || []).some(h => (h?.name || '').toLowerCase() === name.toLowerCase())
+  if (legacy) return 'a header_rules entry'
+
+  const cfg = settings.get('headers')
+  if (cfg.preset === 'off') return null
+
+  const managed = {
+    'strict-transport-security': cfg.hsts_max_age > 0,
+    'x-content-type-options': cfg.x_content_type_options,
+    'x-frame-options': !!cfg.x_frame_options,
+    'referrer-policy': !!cfg.referrer_policy,
+    'content-security-policy': !!cfg.csp || cfg.preset === 'strict',
+    'permissions-policy': !!cfg.permissions_policy || cfg.preset === 'strict',
+    'cross-origin-opener-policy': !!cfg.coop || cfg.preset === 'strict',
+    'cross-origin-resource-policy': !!cfg.corp || cfg.preset === 'strict',
+  }
+  if (managed[name.toLowerCase()]) return `the ${cfg.preset} header policy`
+
+  if (cfg.custom.some(c => (c.name || '').toLowerCase() === name.toLowerCase())) return 'a custom header rule'
+  return null
 }
 
 async function computeChecks() {
@@ -102,30 +125,96 @@ async function computeChecks() {
     recommendation: jwtConfigured ? null : 'Set JWT_SECRET in your .env before deploying anywhere persistent.',
   })
 
+  const totp = require('./totp')
+  const twoFactor = totp.anyEnabled()
   checks.push({
-    id: 'two_factor_auth', category: 'Access Control', weight: 1,
-    status: 'fail',
+    id: 'two_factor_auth', category: 'Access Control', weight: 2,
+    status: twoFactor ? 'pass' : 'warn',
     label: 'Two-factor authentication',
-    detail: 'CatWAF does not currently support 2FA for admin login.',
-    recommendation: 'Not yet available — noted here so it isn\'t forgotten. Consider it for the user-management roadmap item.',
+    detail: twoFactor
+      ? 'An admin account is protected by a time-based one-time password.'
+      : 'No admin account has a second factor enrolled. CatWAF Free is single-admin, so that one password is the whole path to taking over the WAF.',
+    recommendation: twoFactor ? null : 'Enrol an authenticator app under Account → Two-factor authentication.',
+  })
+
+  const session = settings.get('session')
+  const bound = session.bind_ip || session.bind_user_agent || session.idle_timeout_min > 0
+  checks.push({
+    id: 'session_hardening', category: 'Access Control', weight: 1,
+    status: bound ? 'pass' : 'warn',
+    label: 'Admin session hardening',
+    detail: bound
+      ? `Sessions expire after ${session.absolute_max_age_min} minutes${session.idle_timeout_min ? `, or ${session.idle_timeout_min} minutes idle` : ''}${session.bind_ip ? ', and are bound to the client address' : ''}.`
+      : `Sessions last ${session.absolute_max_age_min} minutes with no idle timeout and no client binding.`,
+    recommendation: bound ? null : 'Consider an idle timeout under Settings → Admin sessions. Binding to the client IP is stronger still, but logs you out when your address changes.',
   })
 
   const headerChecks = [
-    ['Content-Security-Policy', 'CSP'],
-    ['Strict-Transport-Security', 'HSTS'],
-    ['X-Frame-Options', 'X-Frame-Options'],
-    ['X-Content-Type-Options', 'X-Content-Type-Options'],
+    ['Content-Security-Policy', 'CSP', 2],
+    ['Strict-Transport-Security', 'HSTS', 2],
+    ['X-Frame-Options', 'X-Frame-Options', 1],
+    ['X-Content-Type-Options', 'X-Content-Type-Options', 1],
+    ['Referrer-Policy', 'Referrer-Policy', 1],
+    ['Permissions-Policy', 'Permissions-Policy', 1],
   ]
-  for (const [headerName, shortName] of headerChecks) {
-    const present = hasHeaderRule(headerName)
+  for (const [headerName, shortName, weight] of headerChecks) {
+    const setBy = headerSetBy(headerName)
     checks.push({
-      id: `header_${shortName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`, category: 'Security Headers', weight: 1,
-      status: present ? 'pass' : 'warn',
+      id: `header_${shortName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`, category: 'Security Headers', weight,
+      status: setBy ? 'pass' : 'warn',
       label: `${shortName} header`,
-      detail: present ? `${headerName} is configured in header_rules.` : `${headerName} is not configured.`,
-      recommendation: present ? null : `Add a header_rules entry for ${headerName} in WAF settings.`,
+      detail: setBy ? `${headerName} is set by ${setBy}.` : `${headerName} is not being sent.`,
+      recommendation: setBy ? null : `Turn on the header policy under Content & Headers — the "strict" preset sets ${headerName} along with the rest.`,
     })
   }
+
+  const cookies = settings.get('cookies')
+  checks.push({
+    id: 'cookie_flags', category: 'Security Headers', weight: 1,
+    status: cookies.enabled ? 'pass' : 'warn',
+    label: 'Cookie flags enforced',
+    detail: cookies.enabled
+      ? `Backend cookies are normalised to ${[cookies.secure !== 'off' && 'Secure', cookies.http_only && 'HttpOnly', cookies.same_site && `SameSite=${cookies.same_site}`].filter(Boolean).join(', ')}.`
+      : 'Cookie security flags depend entirely on the application getting them right.',
+    recommendation: cookies.enabled ? null : 'Enable cookie flags under Content & Headers so Secure/HttpOnly/SameSite are added even when the backend forgets.',
+  })
+
+  // ── Perimeter checks the new settings made answerable ──
+  const access = settings.get('access')
+  checks.push({
+    id: 'reject_unknown_host', category: 'Perimeter', weight: 2,
+    status: access.reject_unknown_host ? 'pass' : 'warn',
+    label: 'Unknown Host/SNI rejected',
+    detail: access.reject_unknown_host
+      ? 'Requests whose Host does not match a known hostname are refused before reaching a site block.'
+      : 'Any Host header reaches the site block, so an attacker who finds the origin IP can bypass a CDN in front of it.',
+    recommendation: access.reject_unknown_host ? null : 'Turn on "Reject unknown Host/SNI" under Access control — this is the mechanical fix for the origin-exposure problem.',
+  })
+
+  const proxy = settings.get('proxy')
+  checks.push({
+    id: 'upstream_tls_verify', category: 'Perimeter', weight: 1,
+    status: proxy.protocol === 'http' ? 'unknown' : proxy.upstream_tls_verify ? 'pass' : 'warn',
+    label: 'Upstream certificate verified',
+    detail: proxy.protocol === 'http'
+      ? 'The backend is reached over plain HTTP, so there is no certificate to verify.'
+      : proxy.upstream_tls_verify
+        ? 'The backend\'s TLS certificate is verified before traffic is forwarded.'
+        : 'The backend is reached over HTTPS but its certificate is not checked, so a spoofed backend would go undetected.',
+    recommendation: proxy.protocol === 'http' || proxy.upstream_tls_verify ? null : 'Enable upstream TLS verification under Reverse proxy once the backend has a real certificate.',
+  })
+
+  const bans = require('./bans').stats()
+  const autoBan = settings.get('bad_behavior').enabled
+  checks.push({
+    id: 'automatic_banning', category: 'WAF', weight: 1,
+    status: autoBan ? 'pass' : 'warn',
+    label: 'Behavioural banning',
+    detail: autoBan
+      ? `Enabled — ${bans.total} address(es) currently banned.`
+      : 'Credential stuffing and endpoint brute-forcing never trip a WAF rule, because each individual request is valid. Nothing is counting failures.',
+    recommendation: autoBan ? null : 'Enable behavioural banning under Protection so repeated failures get an address banned.',
+  })
 
   return checks
 }

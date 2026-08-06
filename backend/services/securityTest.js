@@ -258,6 +258,19 @@ async function collect() {
   } else {
     pass('Security headers', 'CSP, HSTS, frameguard and noSniff configured')
   }
+  // HSTS and upgrade-insecure-requests are sent only where HTTPS is real.
+  // Grepping the source above proves they are configured; this reports
+  // whether they are actually being sent, which is what matters.
+  const expectsHttps = process.env.CATWAF_HTTPS === 'true'
+    || (process.env.CATWAF_HTTPS !== 'false' && !!process.env.DOMAIN)
+  if (expectsHttps) {
+    pass('HTTPS enforcement', 'HSTS and upgrade-insecure-requests are being sent')
+  } else {
+    fail(LOW, 'HSTS is not being sent',
+      'No DOMAIN is configured, so CatWAF is serving over plain HTTP and omits HSTS and upgrade-insecure-requests — sending them would break access over a LAN address and pin a host that has no certificate.',
+      'Expected for a local or LAN install. For an internet-facing deployment set DOMAIN (or CATWAF_HTTPS=true if TLS is terminated in front of CatWAF).')
+  }
+
   if (/connectSrc/.test(serverSource)) {
     pass('CSP connect-src', 'explicitly set')
   } else {

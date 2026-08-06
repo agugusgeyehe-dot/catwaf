@@ -33,7 +33,29 @@ Find the IP in the blocked-request log, or ask the affected person to visit an
 3. If it's one specific page (a comment form, an admin editor), that page is the thing
    to look at — rich text and file uploads are the usual culprits.
 
+## When it's one endpoint, not one visitor
+
+Some endpoints will never stop tripping the rules: a webhook receiver taking raw JSON
+from a payment provider, an upload handler, a rich-text editor's save. Allowing every
+caller's IP doesn't work when the callers are someone else's servers.
+
+Exempt the path instead of weakening protection everywhere:
+
+    catwaf settings access waf_bypass_paths=/webhooks/stripe,/admin/editor/save
+
+Under *Access control* in the dashboard, this is **Paths exempt from WAF inspection**.
+Requests to those paths skip inspection; everything else is unaffected.
+
+Keep the list short and specific. Each entry is a hole in your own firewall, so exempt
+`/webhooks/stripe`, never `/webhooks` and certainly never `/`. Everything else CatWAF
+does — rate limiting, the IP lists, geo blocking, bans — still applies to an exempt path;
+only CRS inspection is skipped.
+
+This is the right answer to "a CRS rule keeps flagging this one endpoint". Dropping the
+paranoia level sitewide to fix one URL is not.
+
 ## What not to do
 
 Don't turn the engine off to fix one blocked customer. That removes protection from the
-entire site to solve a problem affecting one address. Allow their IP instead.
+entire site to solve a problem affecting one address. Allow their IP, or exempt the one
+path, instead.

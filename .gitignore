@@ -1,16 +1,14 @@
-# v0 sandbox internal files
-__v0_runtime_loader.js
-__v0_devtools.tsx
-__v0_jsx-dev-runtime.ts
-.snowflake/
-.v0-trash/
-.vercel/
+# Dependencies
+node_modules/
 
-# Environment variables
+# Environment variables — only .env.example is committed.
 .env
-.env*.local
+.env.*
+!.env.example
+frontend/.env.local
+frontend/.env.*.local
 
-# Runtime data (SQLite db + Caddy state) — never commit real WAF state.
+# Runtime data (SQLite database + Caddy state) — never commit real WAF state.
 # WAL mode writes -wal/-shm sidecars next to the database; the -wal file holds
 # committed rows that are not yet checkpointed into the .db, so it is just as
 # sensitive as the database itself.
@@ -18,47 +16,79 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/*.pid
 *.sqlite
 *.sqlite3
 
-# Generated Caddy config and certs written at runtime
+# Runtime artefacts written next to the database. Caddyfile backups can
+# contain upstream addresses and generated secrets; the rotated Coraza audit
+# logs contain full request data. Neither belongs in the repository.
+data/backups/
+data/certs/
+data/logs/
+data/coraza-audit*.json
+data/coraza-dev-audit.json
+
+# Written at runtime by backend/routes/cloudflare.js (gen-cert)
+backend/data/
+
+# Generated Caddy config written at runtime
 /Caddyfile
 /Caddyfile.bak
 /Caddyfile.dev
-data/certs/
-data/coraza-dev-audit.json
+
+# TLS material — no key or certificate is ever committed.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Build output
+dist/
+frontend/dist/
+.next/
+.cache/
+
+# Vendored Caddy binary fetched by scripts/ensure-caddy.js
+bin/vendor/
+
+# Logs and debug output
+*.log
+logs/
+npm-debug.log*
+yarn-error.log*
+
+# Test, coverage and profiling artefacts
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+*.cpuprofile
+*.heapsnapshot
+*.heapprofile
+
+# Scratch and backup files
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.rej
 
 # Editor / OS metadata
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
+.DS_Store
 Thumbs.db
 
-# Test and coverage artefacts
-coverage/
-.nyc_output/
-test-results/
-playwright-report/
+# Local agent tooling and generated security reports — developer-side only.
+.claude/settings.local.json
+CLAUDE-SECURITY-*/
 
-# runtime (backend/routes/cloudflare.js gen-cert) — never commit these.
-backend/data/
-
-# Common ignores
-node_modules
-.next/
-.DS_Store
-dist/
-frontend/dist/
-*.log
-
-# Service runtime files written next to the database
-data/*.pid
-
-# Vendored Caddy binary fetched by scripts/ensure-caddy.js
-bin/vendor/
-
-# Local tooling clones that are not part of CatWAF
-# Runtime data
-/data/*.db
-/data/*.sqlite
-/data/*.sqlite3
+# Design notes kept alongside the code while a feature is being built.
+# Not part of the shipped project.
+catwaf-indev-ideas/

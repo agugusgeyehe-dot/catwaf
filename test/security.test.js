@@ -5,6 +5,13 @@ const path = require('path')
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'catwaf-test-'))
 process.env.JWT_SECRET = 'a'.repeat(64)
 process.env.DB_DIR = DATA_DIR
+// This test boots the real API, whose WAF endpoints rewrite the Caddyfile.
+// Without pinning these, caddy.js falls back to .env / auto-detection and the
+// suite edits the developer's REAL configuration. Must be set before
+// backend/server.js (and therefore services/caddy.js) is first required.
+process.env.CADDYFILE_PATH = path.join(DATA_DIR, 'Caddyfile')
+process.env.CORAZA_AUDIT_LOG = path.join(DATA_DIR, 'logs', 'audit.json')
+fs.writeFileSync(process.env.CADDYFILE_PATH, '{\n}\n\n:19992 {\n    respond "test" 200\n}\n')
 
 const crypto = require('crypto')
 const ROOT = path.join(__dirname, '..')
@@ -125,6 +132,139 @@ const server = app.listen(0, '127.0.0.1', async () => {
     const forged = jwt.sign({ username: 'owner', role: 'admin' }, 'wrong-secret', { algorithm: 'HS256', jwtid: 'deadbeef' })
     const r = await raw('GET', api.basePath + '/api/waf/engine', { headers: { Authorization: `Bearer ${forged}` } })
     check('token signed with wrong secret is not authenticated', r.status !== 200, r)
+  }
+
+  console.log('\n== /api/caddy/status does not leak the Caddyfile or its secrets ==')
+  {
+    const secretful = [
+      '{',
+      '}',
+      '',
+      'example.com {',
+      '    forward_auth 127.0.0.1:8081 {',
+      '        uri "/api/enforce"',
+      '        header_up X-CatWAF-Enforce-Key "s3cr3t-enforce-key-value"',
+      '        copy_headers "X-CatWAF-Verdict"',
+      '    }',
+      '    basic_auth /* {',
+      '        "opsuser" "$2a$12$' + 'a'.repeat(53) + '"',
+      '    }',
+      '    tls {',
+      '        dns cloudflare "cf-api-token-abcdef"',
+      '        resolvers 1.1.1.1 8.8.8.8',
+      '    }',
+      '    reverse_proxy 127.0.0.1:3000',
+      '}',
+      '',
+    ].join('\n')
+    fs.writeFileSync(process.env.CADDYFILE_PATH, secretful)
+
+    const asAdmin = await raw('GET', api.basePath + '/api/caddy/status', { headers: signed('GET', '/api/caddy/status') })
+    check('admin can still read caddy status', asAdmin.status === 200, asAdmin)
+    const body = asAdmin.json.caddyfile || ''
+    check('admin still receives the Caddyfile body', body.includes('reverse_proxy 127.0.0.1:3000'), body.slice(0, 200))
+    check('enforce key is redacted for admins', !body.includes('s3cr3t-enforce-key-value'), body)
+    check('dns-01 API token is redacted for admins', !body.includes('cf-api-token-abcdef'), body)
+    check('basic-auth hash is redacted for admins', !/\$2[aby]\$\d\d\$/.test(body), body)
+    check('the basic-auth username is kept (not a credential)', body.includes('opsuser'), body)
+    check('the response says the body was redacted', asAdmin.json.caddyfile_redacted === true, asAdmin.json)
+
+    // A read-only viewer must get no Caddyfile at all.
+    const { addUser: addUser2 } = require(path.join(ROOT, 'backend/middleware/auth'))
+    try { addUser2({ username: 'readonly', password: 'viewer-pass-1234', role: 'viewer' }) } catch {}
+    const vLogin = await raw('POST', '/api/auth/login', { body: { username: 'readonly', password: 'viewer-pass-1234' } })
+    check('viewer can log in', vLogin.status === 200, vLogin)
+    const vSigned = (method, p, b) => {
+      const ts = String(Date.now())
+      const nonce = crypto.randomBytes(16).toString('hex')
+      const bodyHash = crypto.createHash('sha256')
+        .update(b === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(b))).digest('hex')
+      const sig = crypto.createHmac('sha256', vLogin.json.sessionKey)
+        .update([method.toUpperCase(), p, ts, nonce, bodyHash].join('\n')).digest('hex')
+      return { 'Authorization': `Bearer ${vLogin.json.token}`, 'X-CatWAF-Ts': ts, 'X-CatWAF-Nonce': nonce, 'X-CatWAF-Sig': sig }
+    }
+    const asViewer = await raw('GET', vLogin.json.api.basePath + '/api/caddy/status',
+      { headers: vSigned('GET', '/api/caddy/status') })
+    check('viewer still gets a status answer', asViewer.status === 200, asViewer)
+    check('viewer receives no Caddyfile body', asViewer.json.caddyfile === '', asViewer.json)
+    check('viewer sees no enforce key', !JSON.stringify(asViewer.json).includes('s3cr3t-enforce-key-value'), asViewer.json)
+    check('viewer sees no dns token', !JSON.stringify(asViewer.json).includes('cf-api-token-abcdef'), asViewer.json)
+    check('viewer sees no basic-auth hash', !/\$2[aby]\$\d\d\$/.test(JSON.stringify(asViewer.json)), asViewer.json)
+  }
+
+  console.log('\n== a signed-out token cannot use /api/handshake ==')
+  {
+    const l = await raw('POST', '/api/auth/login', { body: { username: 'owner', password: 'correct-horse-battery' } })
+    check('login for the handshake test succeeds', l.status === 200, l)
+    const bearer = { Authorization: `Bearer ${l.json.token}` }
+
+    const before = await raw('GET', '/api/handshake', { headers: bearer })
+    check('a live token gets the rotating path from /api/handshake',
+      before.status === 200 && /^\/g\/[0-9a-f]{32}$/.test(before.json.api.basePath), before)
+
+    // Logout is not a fixed path, so it goes through the gate like any other
+    // write, signed with this session's own key.
+    const outTs = String(Date.now())
+    const outNonce = crypto.randomBytes(16).toString('hex')
+    const outHash = crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex')
+    const outSig = crypto.createHmac('sha256', l.json.sessionKey)
+      .update(['POST', '/api/auth/logout', outTs, outNonce, outHash].join('\n')).digest('hex')
+    const out = await raw('POST', l.json.api.basePath + '/api/auth/logout', {
+      headers: { ...bearer, 'X-CatWAF-Ts': outTs, 'X-CatWAF-Nonce': outNonce, 'X-CatWAF-Sig': outSig },
+    })
+    check('logout succeeds', out.status === 200, out)
+
+    const after = await raw('GET', '/api/handshake', { headers: bearer })
+    check('a revoked token is refused at /api/handshake', after.status === 401, after)
+    check('the refusal names the revoked session', after.json && after.json.code === 'SESSION_REVOKED', after.json)
+    check('no rotating path is disclosed to a revoked token',
+      !after.json || after.json.api === undefined, after.json)
+    check('no username or role is disclosed to a revoked token',
+      !after.json || after.json.user === undefined, after.json)
+  }
+
+  console.log('\n== a password reset invalidates every token issued before it ==')
+  {
+    const { setPassword } = require(path.join(ROOT, 'backend/middleware/auth'))
+
+    const l = await raw('POST', '/api/auth/login', { body: { username: 'readonly', password: 'viewer-pass-1234' } })
+    check('pre-reset login succeeds', l.status === 200, l)
+    const bearer = { Authorization: `Bearer ${l.json.token}` }
+    check('the pre-reset token works', (await raw('GET', '/api/handshake', { headers: bearer })).status === 200)
+
+    // Same wall-clock second as the token above — this is the window the
+    // strict `<` comparison used to leave open.
+    setPassword('readonly', 'viewer-pass-5678')
+    const after = await raw('GET', '/api/handshake', { headers: bearer })
+    check('a token issued in the reset second does not survive the reset', after.status === 401, after)
+
+    // Directly assert the boundary rather than relying on timing: a token
+    // whose iat is exactly the reset stamp must be rejected.
+    const jwt2 = require('jsonwebtoken')
+    const { findUser, JWT_ISSUER: iss, JWT_AUDIENCE: aud } = require(path.join(ROOT, 'backend/middleware/auth'))
+    const target = findUser('readonly')
+    const sameSecond = jwt2.sign(
+      { id: target.id, username: target.username, role: target.role, iat: target.tokens_valid_after },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', issuer: iss, audience: aud, jwtid: crypto.randomBytes(16).toString('hex'), expiresIn: '12h' },
+    )
+    const edge = await raw('GET', '/api/handshake', { headers: { Authorization: `Bearer ${sameSecond}` } })
+    check('iat === tokens_valid_after is rejected (no one-second window)', edge.status === 401, edge)
+
+    const older = jwt2.sign(
+      { id: target.id, username: target.username, role: target.role, iat: target.tokens_valid_after - 5 },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', issuer: iss, audience: aud, jwtid: crypto.randomBytes(16).toString('hex'), expiresIn: '12h' },
+    )
+    check('a token from before the reset is rejected',
+      (await raw('GET', '/api/handshake', { headers: { Authorization: `Bearer ${older}` } })).status === 401)
+
+    // And a legitimate login right after the reset still works — the fix must
+    // not lock the account out of its own new password.
+    const relogin = await raw('POST', '/api/auth/login', { body: { username: 'readonly', password: 'viewer-pass-5678' } })
+    check('logging in with the new password still works', relogin.status === 200, relogin)
+    const fresh = await raw('GET', '/api/handshake', { headers: { Authorization: `Bearer ${relogin.json.token}` } })
+    check('the post-reset token is accepted', fresh.status === 200, fresh)
   }
 
   console.log(`\n${pass} passed, ${fail} failed\n`)

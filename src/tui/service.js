@@ -170,6 +170,57 @@ function startWaf() {
   return { ok: true, manager: 'process', pid: child.pid }
 }
 
+// Where the dashboard and API answer, derived from the same environment the
+// server reads. HOST=0.0.0.0 means "every interface" — which is not an
+// address you can open, so it is reported as the loopback one that is
+// guaranteed to reach it.
+function apiAddress() {
+  const port = Number(process.env.PORT || 8000)
+  const host = process.env.HOST || '127.0.0.1'
+  return { host: host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host, port }
+}
+
+function dashboardUrl() {
+  const { host, port } = apiAddress()
+  return `http://${host}:${port}`
+}
+
+// `start()` returns as soon as the process is spawned, which is not the same
+// as CatWAF being up: a bad configuration, an occupied port or a missing
+// database directory all kill the server a moment later. Reporting success
+// on the strength of a successful spawn is what produced "CatWAF started"
+// followed by ECONNREFUSED in the browser.
+//
+// Resolves { ok: true } once /healthz answers, or { ok: false, error } with
+// the reason — including the tail of the log, which is where the actual
+// failure was written.
+async function waitUntilReady(timeoutMs = 15000, { pid = null } = {}) {
+  const { host, port } = apiAddress()
+  const url = `http://${host}:${port}/healthz`
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(1500) })
+      if (res.ok) return { ok: true, url: dashboardUrl() }
+    } catch { /* not up yet */ }
+
+    // If the process we started has already gone, waiting out the timeout
+    // only delays the same answer.
+    if (pid && !pidAlive(pid)) {
+      return { ok: false, error: 'The CatWAF process exited during startup.', log: tailLog() }
+    }
+    await new Promise(r => setTimeout(r, 300))
+  }
+  return { ok: false, error: `CatWAF did not answer on ${url} within ${Math.round(timeoutMs / 1000)}s.`, log: tailLog() }
+}
+
+function tailLog(lines = 12) {
+  try {
+    return fs.readFileSync(logFile(), 'utf8').trimEnd().split('\n').slice(-lines).join('\n')
+  } catch { return null }
+}
+
 async function waitUntilStopped(pid, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -227,5 +278,6 @@ function logs({ lines = 50, follow = false } = {}) {
 module.exports = {
   status, start, stop, restart, logs,
   startWaf, wafStatus, caddyRunning, caddyUnitPresent,
+  waitUntilReady, dashboardUrl, apiAddress, tailLog,
   pidFile, logFile, hasSystemdUnit, systemdUsable, UNIT_PATH,
 }

@@ -28,6 +28,27 @@ const GeoPage             = lazy(() => import('./pages/Pages.jsx').then(m => ({ 
 const AnalyticsPage       = lazy(() => import('./pages/Pages.jsx').then(m => ({ default: m.AnalyticsPage })))
 const AboutPage           = lazy(() => import('./pages/Pages.jsx').then(m => ({ default: m.AboutPage })))
 
+const BansPage            = lazy(() => import('./pages/ProtectionPages.jsx').then(m => ({ default: m.BansPage })))
+const ChallengePage       = lazy(() => import('./pages/ProtectionPages.jsx').then(m => ({ default: m.ChallengePage })))
+const ThreatIntelPage     = lazy(() => import('./pages/ProtectionPages.jsx').then(m => ({ default: m.ThreatIntelPage })))
+const BehaviorPage        = lazy(() => import('./pages/ProtectionPages.jsx').then(m => ({ default: m.BehaviorPage })))
+const ToolFingerprintPage = lazy(() => import('./pages/ProtectionPages.jsx').then(m => ({ default: m.ToolFingerprintPage })))
+
+const AccessControlPage   = lazy(() => import('./pages/ConfigPages.jsx').then(m => ({ default: m.AccessControlPage })))
+const HeadersPage         = lazy(() => import('./pages/ConfigPages.jsx').then(m => ({ default: m.HeadersPage })))
+const TlsPage             = lazy(() => import('./pages/ConfigPages.jsx').then(m => ({ default: m.TlsPage })))
+const ProxyPage           = lazy(() => import('./pages/ConfigPages.jsx').then(m => ({ default: m.ProxyPage })))
+const NetworkConfigPage   = lazy(() => import('./pages/ConfigPages.jsx').then(m => ({ default: m.NetworkPage })))
+const AdvancedConfigPage  = lazy(() => import('./pages/ConfigPages.jsx').then(m => ({ default: m.AdvancedConfigPage })))
+
+const JobsPage            = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.JobsPage })))
+const CachesPage          = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.CachesPage })))
+const TemplatesPage       = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.TemplatesPage })))
+const ReportsPage         = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.ReportsPage })))
+const TwoFactorPage       = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.TwoFactorPage })))
+const BackupsPage         = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.BackupsPage })))
+const TelemetryPage       = lazy(() => import('./pages/OpsExtraPages.jsx').then(m => ({ default: m.TelemetryPage })))
+
 const THEME_OPTIONS = [
   { id: 'dark',     label: 'Dark',       desc: 'Blue-accented dark theme',            preview: ['#0d0f14','#13161d','#4f8ef7'] },
   { id: 'black',    label: 'Pure Black', desc: 'OLED-friendly, monochrome',           preview: ['#000000','#111111','#ffffff'] },
@@ -281,10 +302,30 @@ export default function App() {
             <Route path="/performance-mode"element={<PerformanceModePage />} />
 
             <Route path="/protection/sensitive-files" element={<SensitiveFiles />} />
+            <Route path="/protection/bans"        element={<BansPage />} />
+            <Route path="/protection/challenge"   element={<ChallengePage />} />
+            <Route path="/protection/threat-intel" element={<ThreatIntelPage />} />
+            <Route path="/protection/behavior"    element={<BehaviorPage />} />
+            <Route path="/protection/tool-fingerprint" element={<ToolFingerprintPage />} />
 
             <Route path="/ip/whitelist"   element={<IPListPage listType="whitelist" />} />
             <Route path="/ip/blacklist"   element={<IPListPage listType="blacklist" />} />
             <Route path="/geo"            element={<GeoPage />} />
+
+            <Route path="/config/access"   element={<AccessControlPage />} />
+            <Route path="/config/headers"  element={<HeadersPage />} />
+            <Route path="/config/tls"      element={<TlsPage />} />
+            <Route path="/config/proxy"    element={<ProxyPage />} />
+            <Route path="/config/network"  element={<NetworkConfigPage />} />
+            <Route path="/config/advanced" element={<AdvancedConfigPage />} />
+
+            <Route path="/system/jobs"      element={<JobsPage />} />
+            <Route path="/system/caches"    element={<CachesPage />} />
+            <Route path="/system/templates" element={<TemplatesPage />} />
+            <Route path="/system/reports"   element={<ReportsPage />} />
+            <Route path="/system/backups"   element={<BackupsPage />} />
+            <Route path="/system/2fa"       element={<TwoFactorPage />} />
+            <Route path="/system/telemetry" element={<TelemetryPage />} />
 
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/origin-scanner"  element={<OriginScannerPage />} />

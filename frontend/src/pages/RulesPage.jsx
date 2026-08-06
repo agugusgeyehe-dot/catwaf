@@ -1,7 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Wrench, Search, AlertTriangle, Check, X, Ban } from 'lucide-react'
 import { api } from '../utils/api.js'
-import { EmptyState, Skeleton, SectionTitle } from '../components/ui.jsx'
+import { EmptyState, Skeleton } from '../components/ui.jsx'
 import { severityMeta } from '../utils/severity.js'
 
 export default function RulesPage() {

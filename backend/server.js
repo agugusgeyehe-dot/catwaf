@@ -29,11 +29,14 @@ process.on('unhandledRejection', (reason) => {
   log.error('Unhandled promise rejection', { error: err.message, stack: err.stack })
 })
 
+// CORS_ORIGIN lists origins OTHER than this server that may call the API —
+// the Vite dev server, or a dashboard deployed on a separate host. It is not
+// needed for the normal deployment, where this process serves the dashboard
+// and every call is same-origin (see isSameOrigin below).
 let CORS_ORIGIN = process.env.CORS_ORIGIN
 if (!CORS_ORIGIN) {
   CORS_ORIGIN = 'http://localhost:3000'
-  console.warn('[CatWAF] CORS_ORIGIN is not set — defaulting to the local dev frontend origin (http://localhost:3000).')
-  console.warn('[CatWAF] `catwaf --setup` sets this to your real dashboard URL.')
+  console.warn('[CatWAF] CORS_ORIGIN is not set — allowing the Vite dev server (http://localhost:3000) in addition to this server\'s own origin.')
 }
 const allowedOrigins = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
 
@@ -52,12 +55,38 @@ for (const origin of allowedOrigins) {
   if (/^https?:\/\//.test(origin) && !connectSrc.includes(origin)) connectSrc.push(origin)
 }
 
+// Is this install expected to be reached over HTTPS?
+//
+// This gates two headers that are correct for a public HTTPS deployment and
+// actively break a plain-HTTP one:
+//
+//   upgrade-insecure-requests — rewrites the page's own http:// requests to
+//     https://. Browsers exempt localhost and 127.0.0.1 as "potentially
+//     trustworthy", but NOT a LAN address: on http://192.168.x.y:8000 every
+//     asset and API call was upgraded to https:// against a server speaking
+//     plain HTTP, so the dashboard could not even finish loading. That is
+//     why CatWAF appeared to work on localhost and fail on an IP address.
+//
+//   Strict-Transport-Security — pins the *host* to HTTPS in the browser for
+//     two years. Sent over plain HTTP it is ignored by browsers, but sending
+//     it from a LAN address the moment a proxy ever terminates TLS would
+//     strand that address. Only meaningful where HTTPS is real.
+//
+// Set CATWAF_HTTPS=true to force it on for a deployment behind a TLS
+// terminator that this process cannot detect.
+const EXPECTS_HTTPS = process.env.CATWAF_HTTPS === 'true'
+  || (process.env.CATWAF_HTTPS !== 'false' && !!process.env.DOMAIN)
+
 app.use(helmet({
   contentSecurityPolicy: {
+    useDefaults: false,
     directives: {
       defaultSrc: ["'none'"],
       connectSrc,
       scriptSrc: ["'self'"],
+      // Kept explicitly: `useDefaults: false` above drops helmet's defaults,
+      // and this one blocks inline event-handler attributes.
+      scriptSrcAttr: ["'none'"],
       styleSrc: ["'self'", 'https:', "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:'],
       fontSrc: ["'self'", 'https:', 'data:'],
@@ -65,9 +94,10 @@ app.use(helmet({
       baseUri: ["'none'"],
       formAction: ["'self'"],
       objectSrc: ["'none'"],
+      ...(EXPECTS_HTTPS ? { upgradeInsecureRequests: [] } : {}),
     },
   },
-  hsts: { maxAge: 63072000, includeSubDomains: true, preload: true },
+  hsts: EXPECTS_HTTPS ? { maxAge: 63072000, includeSubDomains: true, preload: true } : false,
   referrerPolicy: { policy: 'no-referrer' },
   crossOriginResourcePolicy: { policy: 'same-site' },
   crossOriginOpenerPolicy: { policy: 'same-origin' },
@@ -75,15 +105,50 @@ app.use(helmet({
   frameguard: { action: 'deny' },
 }))
 
-app.use(cors({
-  origin: (origin, cb) => {
-    cb(null, !origin || allowedOrigins.includes(origin))
-  },
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CatWAF-Ts', 'X-CatWAF-Nonce', 'X-CatWAF-Sig'],
-  maxAge: 600,
+// A request whose Origin is the very server that answered it is not a
+// cross-origin request, whatever CORS_ORIGIN happens to say. In the normal
+// single-port deployment the dashboard is served by this process, so the
+// browser sends `Origin: http://<whatever-address-you-typed>` — localhost,
+// 127.0.0.1, the LAN address, a hostname. Refusing those made CatWAF appear
+// to work only from the exact URL recorded at setup time, and the failure
+// surfaced in the browser as an unexplained network error during login.
+//
+// This does not widen anything: the response was already going to be sent to
+// that origin, because that origin is this server. CORS_ORIGIN still governs
+// genuinely cross-origin callers (a dashboard on a separate host, the
+// `api.catwaf.<domain>` split deployment, the Vite dev server).
+function isSameOrigin(req, origin) {
+  const host = req.headers.host
+  if (!host || !origin) return false
+  // `x-forwarded-proto` is only trusted as far as trust proxy is configured,
+  // and either way both candidates are compared — a proxy that terminates TLS
+  // gives the browser https:// while this process sees http://.
+  return origin === `http://${host}` || origin === `https://${host}`
+}
+
+app.use(cors((req, cb) => {
+  const origin = req.headers.origin
+  cb(null, {
+    origin: !origin || isSameOrigin(req, origin) || allowedOrigins.includes(origin),
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-CatWAF-Ts', 'X-CatWAF-Nonce', 'X-CatWAF-Sig'],
+    maxAge: 600,
+  })
 }))
 
 app.get('/healthz', (req, res) => res.json({ ok: true }))
+
+// Routes that have to live at a fixed URL, outside the rotating admin path:
+// Caddy's enforcement hop, the visitor-facing challenge page, the metrics
+// scrape endpoint, and the first-run wizard. Each carries its own
+// authentication (see routes/gateway.js) because none of them can rely on
+// the dashboard's gate. Mounted before the gate so a forward_auth call is
+// never answered by the 404 decoy — which forward_auth would read as "deny"
+// and use to take the protected site down.
+// Both routers parse their own bodies: the shared express.json below is
+// paired with the request-signing raw-body capture, which these pre-gate
+// routes are deliberately not part of.
+app.use(require('./routes/gateway'))
+app.use(require('./routes/setup'))
 
 const ungatedLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -124,6 +189,10 @@ app.use(require('./routes/security'))
 app.use(require('./routes/users'))
 app.use(require('./routes/waftools'))
 app.use(require('./routes/catai'))
+app.use(require('./routes/settings'))
+app.use(require('./routes/protect'))
+app.use(require('./routes/apps'))
+app.use(require('./routes/ops'))
 
 const DIST = path.join(__dirname, '..', 'frontend', 'dist')
 if (fs.existsSync(path.join(DIST, 'index.html'))) {
@@ -157,6 +226,21 @@ const state = require('./services/state')
 function start() {
   if (auditSvc.getSnapshots().length === 0) auditSvc.snapshot({ user: { username: 'system' } }, 'initial')
 
+  // SQLite pragmas that are configurable rather than hardcoded.
+  try {
+    const tuning = require('./services/dbTuning').apply()
+    if (tuning.failures.length) log.warn('Some database settings could not be applied', { failures: tuning.failures })
+  } catch (e) { log.error('Database tuning failed', { error: e.message }) }
+
+  // Everything time-based registers into one scheduler rather than growing
+  // its own timer.
+  try {
+    const jobs = require('./services/jobs')
+    const count = require('./services/jobRegistry').registerAll()
+    jobs.start()
+    log.info(`Scheduler started with ${count} job(s)`)
+  } catch (e) { log.error('Could not start the job scheduler', { error: e.message }) }
+
   const ingestResult = requestLogSvc.ingestNewEntries()
   if (ingestResult.reason) log.info(`Request log ingestion: ${ingestResult.reason}`)
   const ingestTimer = setInterval(() => {
@@ -172,6 +256,20 @@ function start() {
     catch (e) { log.error('Request log purge failed', { error: e.message }) }
   }, 6 * 60 * 60 * 1000)
   purgeTimer.unref()
+
+  // Coraza never prunes its own audit log. Without this it grows until the
+  // disk fills and the WAF stops. maintain() recovers any interrupted
+  // rotation, rotates on size/age, and prunes archives; it never throws.
+  const auditLogSvc = require('./services/auditLog')
+  const runAuditMaintenance = () => {
+    const r = auditLogSvc.maintain()
+    if (r.rotated) log.info('Audit log rotated', { from: r.from, to: r.to, reason: r.reason, ingested: r.ingested })
+    else if (r.ok === false && r.error) log.error('Audit log maintenance failed', { error: r.error })
+    for (const f of r.pruneFailures || []) log.error('Could not prune a rotated audit log', { file: f.name, error: f.error })
+  }
+  runAuditMaintenance()
+  const auditTimer = setInterval(runAuditMaintenance, 10 * 60 * 1000)
+  auditTimer.unref()
 
   const server = app.listen(PORT, HOST, () => {
     log.info(`CatWAF Free API listening on http://${HOST}:${PORT}`, { port: PORT, db: db.DB_PATH, version: pkgVersion })

@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/agugusgeyehe-dot/catwaf/security/advisories/new
+    about: >-
+      Do not open a public issue for a security problem in CatWAF. Report it
+      privately — see SECURITY.md for what to include and what to expect.

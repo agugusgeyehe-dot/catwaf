@@ -1,4 +1,3 @@
-import React from 'react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 
 const AXIS_TICK = { fontSize: 10, fill: 'var(--cat-sub)' }

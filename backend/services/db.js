@@ -60,6 +60,43 @@ function openDb(dbPath) {
       reason      TEXT,
       matched_var TEXT
     );
+    -- One row per currently-active ban, whatever produced it (idea #61).
+    -- Every ban-producing feature writes here so there is a single answer to
+    -- "why is this address blocked right now, and can I lift it?".
+    CREATE TABLE IF NOT EXISTS active_bans (
+      id         TEXT PRIMARY KEY,
+      target     TEXT NOT NULL,
+      source     TEXT NOT NULL,
+      reason     TEXT,
+      rule_id    TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      hits       INTEGER DEFAULT 1,
+      meta       TEXT
+    );
+    -- Entries pulled from subscribed community lists (idea #10). Kept in
+    -- their own table, tagged with the source they came from, so a user can
+    -- unsubscribe from a feed without losing their own manual entries — and
+    -- so a 50k-entry feed does not have to be JSON-parsed on every read.
+    CREATE TABLE IF NOT EXISTS list_entries (
+      source_id TEXT NOT NULL,
+      kind      TEXT NOT NULL,
+      list      TEXT NOT NULL,
+      value     TEXT NOT NULL,
+      added_at  TEXT,
+      PRIMARY KEY (source_id, value)
+    );
+    CREATE INDEX IF NOT EXISTS idx_list_entries_lookup ON list_entries(kind, list, value);
+    CREATE INDEX IF NOT EXISTS idx_active_bans_target ON active_bans(target);
+    CREATE INDEX IF NOT EXISTS idx_active_bans_expires ON active_bans(expires_at);
+    -- How many times an address has been banned before, so repeat offenders
+    -- can be escalated without keeping every expired ban row forever.
+    CREATE TABLE IF NOT EXISTS ban_history (
+      target     TEXT PRIMARY KEY,
+      count      INTEGER NOT NULL DEFAULT 0,
+      last_ban   TEXT,
+      last_source TEXT
+    );
     CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log(ts DESC);
     -- Almost every analytics query is "blocked requests in a time window":
     -- the stats tiles, the attack-type breakdown, the severity split and the

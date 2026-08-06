@@ -11,10 +11,24 @@ router.post('/api/caddy/reload', writeRequired, (req, res) => {
   res.status(result.reloaded ? 200 : 500).json({ reloaded: result.reloaded, error: result.error })
 })
 
+// The Caddyfile body is admin-only and redacted even then. It carries the
+// derived X-CatWAF-Enforce-Key, the ACME dns-01 API token and the basic-auth
+// hash as plaintext literals, and those fields are writeOnly everywhere else
+// in the API — a read-only viewer must not be able to read here what
+// settings redact() withholds from them on every other route.
 router.get('/api/caddy/status', (req, res) => {
+  const isAdmin = req.user && req.user.role === 'admin'
   let caddyfile = ''
-  try { caddyfile = require('fs').readFileSync(caddySvc.CADDYFILE_PATH, 'utf8') } catch {}
-  res.json({ running: caddySvc.isCaddyRunning(), caddyfile_path: caddySvc.CADDYFILE_PATH, caddyfile })
+  if (isAdmin) {
+    try { caddyfile = caddySvc.redactCaddyfile(require('fs').readFileSync(caddySvc.CADDYFILE_PATH, 'utf8')) } catch {}
+  }
+  res.json({
+    running: caddySvc.isCaddyRunning(),
+    caddyfile_path: caddySvc.CADDYFILE_PATH,
+    caddyfile,
+    caddyfile_redacted: isAdmin,
+    caddyfile_visible: isAdmin,
+  })
 })
 
 router.get('/api/caddy/reload-queue/status', (req, res) => {

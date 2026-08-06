@@ -6,6 +6,10 @@ const path = require('path')
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'catwaf-catai-test-'))
 process.env.JWT_SECRET = 'b'.repeat(64)
 process.env.DB_DIR = DATA_DIR
+// Never let a reload reach a Caddy the developer is running locally:
+// `caddy reload` targets CADDY_ADMIN_URL, which defaults to :2019.
+process.env.CADDY_ADMIN_URL = 'http://127.0.0.1:19917'
+
 
 const ROOT = path.join(__dirname, '..')
 const retrieval = require(path.join(ROOT, 'backend/services/catai/retrieval'))

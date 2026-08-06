@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import { Cloud,
   LayoutDashboard, Activity, Settings,
@@ -7,6 +7,8 @@ import { Cloud,
   BarChart2, Bell,
   Zap, Sliders,
   ShieldCheck, Wrench,
+  ShieldQuestion, Radar, Lock, FileCode, Server, Network, KeyRound, Fingerprint,
+  Clock, Database, LayoutTemplate, FileBarChart, Archive, Send,
   ChevronDown, ChevronLeft, X, Menu
 } from 'lucide-react'
 
@@ -25,17 +27,37 @@ export const NAV = [
     { path: '/performance-mode', icon: Zap,       label: 'Performance Mode' },
   ]},
   { group: 'Protection', items: [
-    { path: '/protection/sensitive-files',icon: FolderOpen, label: 'Sensitive Files' },
+    { path: '/protection/sensitive-files',icon: FolderOpen,     label: 'Sensitive Files' },
+    { path: '/protection/bans',           icon: Ban,            label: 'Active Bans' },
+    { path: '/protection/challenge',      icon: ShieldQuestion, label: 'Challenge Gate' },
+    { path: '/protection/threat-intel',   icon: Radar,          label: 'Threat Intel' },
+    { path: '/protection/behavior',       icon: Activity,       label: 'Behavioural Banning' },
+    { path: '/protection/tool-fingerprint', icon: Fingerprint,  label: 'Tool Fingerprinting' },
   ]},
   { group: 'Access Control', items: [
     { path: '/ip/whitelist', icon: CheckCircle, label: 'IP Whitelist' },
     { path: '/ip/blacklist', icon: Ban,         label: 'IP Blacklist' },
     { path: '/geo',          icon: Globe,       label: 'Geo Blocking' },
   ]},
+  { group: 'Configuration', items: [
+    { path: '/config/access',   icon: ShieldAlert, label: 'Access Control' },
+    { path: '/config/headers',  icon: FileCode,    label: 'Content & Headers' },
+    { path: '/config/tls',      icon: Lock,        label: 'TLS & Certificates' },
+    { path: '/config/proxy',    icon: Server,      label: 'Reverse Proxy' },
+    { path: '/config/network',  icon: Network,     label: 'Network' },
+    { path: '/config/advanced', icon: KeyRound,    label: 'Advanced' },
+  ]},
   { group: 'System', items: [
     { path: '/logs',     icon: FileText,  label: 'Logs' },
     { path: '/settings', icon: Settings,  label: 'Settings' },
     { path: '/alerts',   icon: Bell,      label: 'Alerts' },
+    { path: '/system/jobs',      icon: Clock,          label: 'Scheduled Jobs' },
+    { path: '/system/caches',    icon: Database,       label: 'Caches' },
+    { path: '/system/templates', icon: LayoutTemplate, label: 'Templates' },
+    { path: '/system/reports',   icon: FileBarChart,   label: 'Reports' },
+    { path: '/system/backups',   icon: Archive,        label: 'Backups' },
+    { path: '/system/2fa',       icon: KeyRound,       label: 'Two-Factor' },
+    { path: '/system/telemetry', icon: Send,           label: 'Telemetry' },
     { path: '/origin-scanner',   icon: Search,         label: 'Origin Exposure Scanner' },
     { path: '/diagnostics',      icon: Activity,       label: 'Setup Diagnostics' },
     { path: '/about',    icon: Wrench,    label: 'About / Versions' },

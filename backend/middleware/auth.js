@@ -49,8 +49,19 @@ function setPassword(username, password) {
   if (!u) throw new Error(`User "${username}" not found`)
   if (!password || password.length < MIN_PASSWORD_LENGTH) throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
   u.password_hash = bcrypt.hashSync(password, BCRYPT_COST)
+  // Every token issued up to and including this second is dead: softAuth
+  // compares with <=, and routes/auth.js refuses to mint a token whose iat
+  // would land on this same second. Second granularity is all a JWT iat
+  // carries, so the boundary has to be inclusive on both sides or a token
+  // minted in the reset second survives the reset that was meant to kill it.
   u.tokens_valid_after = Math.floor(Date.now() / 1000)
   saveUsers(_users)
+  // Belt and braces, and the part that shows up in the session list: revoke
+  // the tracked sessions by jti as well, so an operator can see that the
+  // reset ended them. Required lazily and tolerantly for the same reason
+  // authRequired does it — the CLI paths never load the settings namespace,
+  // and the tokens_valid_after stamp above is the authoritative control.
+  try { require('../services/session').closeAllFor(username) } catch {}
   return u
 }
 
@@ -105,8 +116,14 @@ function softAuth(req, res, next) {
         audience: JWT_AUDIENCE,
       })
       const live = _users.find(u => u.id === claims.id)
+      // Inclusive: a JWT iat is whole seconds, so a token minted in the same
+      // second as the reset carries iat === tokens_valid_after. Treating that
+      // as fresh left a one-second window in which an already-issued token
+      // survived the password change. Legitimate logins are not caught by the
+      // wider comparison because routes/auth.js pushes a new token's iat past
+      // tokens_valid_after when the two would collide.
       const staleAfterReset = live && live.tokens_valid_after && claims.iat != null
-        && claims.iat < live.tokens_valid_after
+        && claims.iat <= live.tokens_valid_after
       if (live && !staleAfterReset) {
         req.user = { ...claims, username: live.username, role: live.role }
       }
@@ -120,6 +137,15 @@ function authRequired(req, res, next) {
   if (!req.user || !req.user.jti || req.user.username === 'guest') {
     return res.status(401).json({ detail: 'Authentication required.', code: 'AUTH_REQUIRED' })
   }
+  // Idle timeout and IP/browser binding (idea #25). Required lazily so the
+  // middleware stays usable in the CLI paths that never load the settings
+  // namespace, and so a failure here can never break authentication itself.
+  try {
+    const check = require('../services/session').touch(req.user.jti, req)
+    if (check && check.ok === false) {
+      return res.status(401).json({ detail: check.detail, code: check.code })
+    }
+  } catch { /* session tracking is hardening, not the auth decision */ }
   next()
 }
 

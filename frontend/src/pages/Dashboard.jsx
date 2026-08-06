@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, lazy, Suspense } from 'react'
+import { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { Shield, Activity, AlertTriangle, Zap, TrendingUp, Ban, Clock, ShieldCheck, ShieldAlert, ShieldX, MapPin } from 'lucide-react'
 import { StatCard, SectionTitle, Skeleton, EmptyState } from '../components/ui.jsx'
 import { api } from '../utils/api.js'

@@ -111,6 +111,20 @@ process.on('SIGINT', () => { cleanup(); process.exit(130) })
   state.WAF.geo_blocking = []
   state.WAF.ip_blacklist = []
 
+  // This test stands up Caddy on its own, with no CatWAF API behind it —
+  // which is exactly what a default install must tolerate. Any enabled
+  // runtime-enforcement feature renders a `forward_auth` hop back into that
+  // API, and Caddy reads a failed dial as a denial, so every request below
+  // would 502 before Coraza's verdict could be observed.
+  //
+  // Nothing is switched off here on purpose: this asserts the shipped default
+  // rather than arranging for it. If a runtime feature is ever defaulted back
+  // on, this test fails, and it should — see the comment on tools_fingerprint
+  // in backend/services/settings/schema.js and docs/protection.md.
+  const enforce = require(path.join(ROOT, 'backend/services/enforce'))
+  check('a default install renders no hop back into the CatWAF API',
+    enforce.isActive() === false, enforce.activeFeatures())
+
   const caddySvc = require(path.join(ROOT, 'backend/services/caddy'))
   caddySvc.patchWAFCaddyfile(state.WAF)
 

@@ -1,0 +1,81 @@
+# test/fixtures/apache-php-fpm — live-test fixture for Apache discovery.
+#
+# The Apache counterpart of test/fixtures/nginx-php-fpm: the same split
+# architecture, but fronted by Apache httpd instead of nginx, so Apache
+# support is proven on its own stack rather than by relabelling the nginx
+# one.
+#
+#     booknook_apache  httpd:2.4-alpine    container 80,   NOT published
+#     booknook_php     (built here)        container 9000, not published
+#     booknook_db      mariadb:10.11       container 3306, not published
+#
+# Nothing is published to the host. CatWAF must discover Apache on the
+# Docker network and reach it without any host port mapping — and, because
+# nothing else can reach it, CatWAF becomes the only way in.
+#
+# Usage:
+#   docker compose -p booknook -f test/fixtures/apache-php-fpm/docker-compose.yml up -d --build
+#   catwaf auto
+#   docker compose -p booknook -f test/fixtures/apache-php-fpm/docker-compose.yml down -v
+#
+# Expected discovery result:
+#   ✓ apache  Web server: Apache / Runtime: PHP 8.3 / backend booknook_php:9000
+#   ○ php     PHP-FPM backend for apache
+#   ○ db      No HTTP service detected
+
+services:
+  apache:
+    build:
+      context: .
+      dockerfile: Apache.Dockerfile
+    image: booknook-apache
+    container_name: booknook_apache
+    restart: unless-stopped
+    # Deliberately NOT published — see the note above.
+    expose:
+      - "80"
+    volumes:
+      # :z relabels for SELinux (Fedora/RHEL enforce by default; without it
+      # the container gets 'Permission denied' on the bind mount).
+      - ./www:/var/www/html:ro,z
+    depends_on:
+      - php
+    networks:
+      - booknook
+    security_opt:
+      - no-new-privileges:true
+
+  php:
+    build:
+      context: .
+      dockerfile: Php.Dockerfile
+    image: booknook-php
+    container_name: booknook_php
+    restart: unless-stopped
+    expose:
+      - "9000"
+    volumes:
+      # :z relabels for SELinux (Fedora/RHEL enforce by default; without it
+      # the container gets 'Permission denied' on the bind mount).
+      - ./www:/var/www/html:ro,z
+    networks:
+      - booknook
+    security_opt:
+      - no-new-privileges:true
+
+  db:
+    image: mariadb:10.11
+    container_name: booknook_db
+    restart: unless-stopped
+    expose:
+      - "3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: fixture-only-not-a-real-secret
+      MARIADB_DATABASE: booknook
+    networks:
+      - booknook
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  booknook:

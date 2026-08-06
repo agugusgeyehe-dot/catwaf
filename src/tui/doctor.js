@@ -121,6 +121,36 @@ async function collect() {
       auditExists ? `Audit log present (${fs.statSync(auditPath).size} bytes)` : 'Audit log not written yet',
       null,
       auditExists ? null : 'Normal on a fresh install. It appears once Coraza logs its first relevant request.')
+
+    // Rotation health: Coraza never prunes its own log, so an audit log
+    // near its limit that CatWAF cannot rotate will fill the disk.
+    try {
+      const auditLogSvc = require(path.join(BACKEND_DIR, "services", "auditLog.js"))
+      const a = auditLogSvc.status()
+      const mb = n => `${(n / 1024 / 1024).toFixed(1)}MB`
+
+      if (!a.writable) {
+        r.add(FAIL,
+          `Audit log cannot be rotated: ${path.dirname(a.activePath)} is not writable`,
+          null,
+          'CatWAF cannot rotate or prune the audit log, so it will grow until the disk fills. Give CatWAF write access to that directory, or point CORAZA_AUDIT_LOG somewhere it can write.')
+      } else if (a.percentOfMax >= 90) {
+        r.add(WARN,
+          `Audit log is at ${a.percentOfMax}% of its rotation limit (${mb(a.sizeBytes)} of ${a.retention.maxSizeMb}MB)`,
+          null,
+          'It will rotate automatically on the next maintenance pass. Raise CATWAF_AUDIT_MAX_SIZE_MB if you want larger files.')
+      } else {
+        r.add(OK,
+          `Audit log rotation: ${a.rotatedFiles} rotated file(s), ${mb(a.totalBytes)} total, ${a.percentOfMax}% of the ${a.retention.maxSizeMb}MB limit`)
+      }
+
+      if (a.rotationPending) {
+        r.add(WARN, 'An audit log rotation was interrupted', null,
+          'CatWAF finishes or reverts it automatically on the next maintenance pass; no data is lost.')
+      }
+    } catch (e) {
+      r.add(INFO, `Audit log rotation status unavailable: ${e.message}`)
+    }
   }
 
   let dbOk = false, dbDetail = null
@@ -212,7 +242,57 @@ async function collect() {
     r.add(OK, 'Dashboard build present')
   }
 
+  addCaddyCapabilityChecks(r)
+
   return { env, results: r.results }
+}
+
+// What the installed Caddy build can actually do, and what CatWAF had to
+// leave out of the generated configuration because of it.
+//
+// This is the single most useful thing doctor can tell you about a feature
+// that looks switched on but is not doing anything: CatWAF skips a directive
+// whose module is missing rather than emitting one Caddy would reject, so
+// without this report a missing module looks like a silent no-op.
+function addCaddyCapabilityChecks(r) {
+  let modules
+  let renderReport
+  try {
+    modules = require(path.join(BACKEND_DIR, 'services', 'caddyModules.js')).summary()
+    renderReport = require(path.join(BACKEND_DIR, 'services', 'caddy.js')).lastRenderReport()
+  } catch (e) {
+    r.add(INFO, 'Caddy capability report unavailable', e.message)
+    return
+  }
+
+  if (!modules.binary_available) {
+    r.add(WARN, 'Cannot ask Caddy what it supports', 'The caddy binary was not found on PATH.',
+      'Optional features are skipped rather than guessed at. Install Caddy, or set CADDY_BIN to its path.')
+    return
+  }
+
+  r.add(OK, `Caddy ${modules.version || 'present'} — ${modules.module_count} modules`)
+
+  const missing = Object.entries(modules.features).filter(([, f]) => !f.ok)
+  if (!missing.length) {
+    r.add(OK, 'Every optional Caddy module CatWAF can use is present')
+  } else {
+    for (const [name, f] of missing) {
+      r.add(INFO, `Optional module missing: ${f.label || name}`, f.module, f.hint)
+    }
+  }
+
+  const skipped = renderReport?.skipped || []
+  if (skipped.length) {
+    for (const s of skipped) {
+      r.add(WARN, `Enabled but not in effect: ${s.feature}`, s.reason,
+        s.module
+          ? `CatWAF left this out of the generated configuration rather than emitting a directive Caddy would reject. Needs: ${s.module}`
+          : 'CatWAF left this out of the generated configuration rather than emitting a directive Caddy would reject.')
+    }
+  } else {
+    r.add(OK, 'Every enabled setting made it into the generated configuration')
+  }
 }
 
 function summarize(results) {

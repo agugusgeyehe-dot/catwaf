@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, X, Info } from 'lucide-react'
 
 export function Toggle({ on, onChange, disabled }) {

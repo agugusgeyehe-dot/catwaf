@@ -1,8 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { FileText, Search, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react'
 import { api } from '../utils/api.js'
-import { EmptyState, Skeleton, SectionTitle } from '../components/ui.jsx'
-import { severityMeta } from '../utils/severity.js'
+import { EmptyState, Skeleton } from '../components/ui.jsx'
 
 const WINDOW_OPTIONS = [
   { id: '1h', label: '1h' }, { id: '24h', label: '24h' }, { id: '7d', label: '7d' }, { id: '30d', label: '30d' },

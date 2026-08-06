@@ -104,15 +104,29 @@ section('CLI: help covers exactly what dispatches')
   check('`catwaf help` exits 0', help.code === 0)
 
   const src = fs.readFileSync(CLI, 'utf8')
-  const dispatched = new Set([...src.matchAll(/case '([a-z-]+)':/g)].map(m => m[1]))
+  const NAME = "[a-z0-9][a-z0-9-]*"
+  const dispatched = new Set([...src.matchAll(new RegExp(`case '(${NAME})':`, 'g'))].map(m => m[1]))
   const mainHelp = src.slice(src.indexOf('main: `'), src.indexOf('setup: `'))
   const advertised = new Set(
-    [...mainHelp.matchAll(/^ {2}([a-z][a-z-]+)(?: [<[][^\]>]*[\]>])?\s{2,}\S/gm)].map(m => m[1])
+    [...mainHelp.matchAll(new RegExp(`^ {2}(${NAME})(?: [<[][^\\]>]*[\\]>])?\\s{2,}\\S`, 'gm'))].map(m => m[1])
   )
 
-  const undocumented = [...dispatched].filter(c =>
-    !advertised.has(c) && !['install', 'users'].includes(c))
+  // Consecutive bare cases fall through to one handler ("case 'user': case
+  // 'users': …"), and help documents the first spelling rather than every
+  // one. Everything after the first in such a run is an alias — detect that
+  // instead of keeping a list that has to be edited whenever one is added.
+  const aliases = new Set()
+  for (const run of src.matchAll(new RegExp(`(?:case '${NAME}':\\s*){2,}`, 'g'))) {
+    const names = [...run[0].matchAll(new RegExp(`case '(${NAME})':`, 'g'))].map(m => m[1])
+    for (const name of names.slice(1)) aliases.add(name)
+  }
+
+  const undocumented = [...dispatched].filter(c => !advertised.has(c) && !aliases.has(c))
   check('every dispatchable command appears in help', undocumented.length === 0, undocumented)
+  check('the alias detector still finds the long-standing aliases',
+    aliases.has('install') && aliases.has('users'), [...aliases])
+  check('a command with its own handler is never treated as an alias',
+    !aliases.has('setup') && !aliases.has('doctor') && !aliases.has('settings'), [...aliases])
 
   const nonexistent = [...advertised].filter(c => !dispatched.has(c))
   check('help advertises no command that does not dispatch', nonexistent.length === 0, nonexistent)

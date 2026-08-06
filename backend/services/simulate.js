@@ -192,7 +192,13 @@ async function runSandbox(request, { engineOverride = null } = {}) {
       '',
     ].join('\n'))
 
-    const block = caddySvc.buildWAFBlock(simWaf).replace(
+    // `backend: null` renders the block without the hops back into CatWAF's
+    // own API (the challenge endpoints and the `forward_auth` enforcement
+    // hop). This sandbox is a private Caddy with no CatWAF behind it, so
+    // those hops cannot be answered and Caddy would return 502 for every
+    // request that Coraza allowed — making a benign request look like it had
+    // been stopped. What is being simulated here is Coraza + the CRS.
+    const block = caddySvc.buildWAFBlock(simWaf, { backend: null, recordReport: false }).replace(
       new RegExp(escapeRegExp(originalAudit), 'g'), auditLog
     )
     const body = fs.readFileSync(caddyfile, 'utf8')

@@ -15,6 +15,17 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..')
 const WAF_MARKER_START = '# @@CATWAF_WAF_START@@'
 const WAF_MARKER_END   = '# @@CATWAF_WAF_END@@'
 
+// Two further managed regions, added alongside the original per-site WAF
+// block. Neither could live inside it: global options (listener wrappers,
+// trusted proxies, protocol selection, server timeouts) are per-server, not
+// per-site, and the reject-unknown-Host catch-all has to be its own
+// top-level site block or an unmatched Host would fall through to whichever
+// block happens to be first.
+const GLOBAL_MARKER_START = '# @@CATWAF_GLOBAL_START@@'
+const GLOBAL_MARKER_END   = '# @@CATWAF_GLOBAL_END@@'
+const CATCHALL_MARKER_START = '# @@CATWAF_CATCHALL_START@@'
+const CATCHALL_MARKER_END   = '# @@CATWAF_CATCHALL_END@@'
+
 function candidatePaths() {
   const out = []
 
@@ -62,7 +73,130 @@ const CADDYFILE_PATH  = detectCaddyfilePath()
 const CADDYFILE_SOURCE = process.env.CADDYFILE_PATH ? 'CADDYFILE_PATH' : 'auto-detected'
 const CORAZA_LIST_DIR = process.env.CORAZA_LIST_DIR || '/etc/coraza/lists'
 const CADDY_ADMIN_URL = (process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:2019').replace(/\/+$/, '')
-const AUDIT_LOG_PATH  = process.env.CORAZA_AUDIT_LOG || '/var/log/coraza/audit.json'
+// Coraza opens SecAuditLog when the config is PROVISIONED, not lazily on the
+// first audit entry — so `caddy validate` fails outright if the path is not
+// openable. /var/log/coraza is the right default under Docker (compose mounts
+// a volume there), but on a host-native install it neither exists nor is
+// creatable by an unprivileged CatWAF, which made every apply fail with
+// "open /var/log/coraza/audit.json: no such file or directory".
+//
+// The path is therefore resolved to somewhere CatWAF can actually write,
+// preferring the conventional location and falling back to CatWAF's own data
+// directory. An explicitly configured CORAZA_AUDIT_LOG is never silently
+// relocated — if it cannot be prepared, that is reported as an error.
+const DEFAULT_AUDIT_LOG = '/var/log/coraza/audit.json'
+const AUDIT_LOG_EXPLICIT = !!process.env.CORAZA_AUDIT_LOG
+
+function dataDir() {
+  return process.env.DB_DIR || path.join(PROJECT_ROOT, 'data')
+}
+
+function auditLogCandidates() {
+  if (AUDIT_LOG_EXPLICIT) return [process.env.CORAZA_AUDIT_LOG]
+  return [DEFAULT_AUDIT_LOG, path.join(dataDir(), 'logs', 'coraza-audit.json')]
+}
+
+function isWritable(p) {
+  try { fs.accessSync(p, fs.constants.W_OK); return true } catch { return false }
+}
+
+// Can this candidate be used without creating anything? Used by --dry-run,
+// which must not touch the filesystem but must still predict a real run.
+function auditLogUsable(candidate) {
+  if (fs.existsSync(candidate)) return isWritable(candidate)
+  const dir = path.dirname(candidate)
+  if (fs.existsSync(dir)) return isWritable(dir)
+  // the directory would have to be created — is the nearest existing
+  // ancestor writable?
+  let ancestor = path.dirname(dir)
+  while (ancestor && ancestor !== path.dirname(ancestor) && !fs.existsSync(ancestor)) {
+    ancestor = path.dirname(ancestor)
+  }
+  return isWritable(ancestor)
+}
+
+// Non-mutating: what would ensureAuditLog() pick?
+function auditLogStatus() {
+  for (const candidate of auditLogCandidates()) {
+    if (auditLogUsable(candidate)) {
+      return { ok: true, path: candidate, fellBack: candidate !== (process.env.CORAZA_AUDIT_LOG || DEFAULT_AUDIT_LOG) }
+    }
+  }
+  return { ok: false, attempted: auditLogCandidates() }
+}
+
+// Resolved at module load so EVERY process agrees on the effective path —
+// including read-only commands like `catwaf audit`, `health` and `doctor`,
+// which never call ensureAuditLog(). Without this they read the default
+// /var/log path, find nothing, and report zero events while Coraza is
+// happily writing to the fallback. Purely inspective: creates nothing.
+// The unrotated path: what the audit log is called before rotation renames
+// the *active* file. services/auditLog.js derives its archive naming and its
+// sidecar state location from this.
+function baseAuditLogPath() {
+  if (AUDIT_LOG_EXPLICIT) return process.env.CORAZA_AUDIT_LOG
+  const candidates = auditLogCandidates()
+  const existing = candidates.find(c => { try { return fs.statSync(c).isFile() } catch { return false } })
+  if (existing) return existing
+  return candidates.find(auditLogUsable) || DEFAULT_AUDIT_LOG
+}
+
+// Rotation moves the ACTIVE log to a new path (see services/auditLog.js for
+// why it cannot keep one path forever), recording it in a sidecar file next
+// to the logs. That file is read here with nothing but `fs` so this module
+// stays dependency-free and usable before the database exists.
+function rotatedActivePath(basePath) {
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(path.dirname(basePath), '.catwaf-audit-state.json'), 'utf8'))
+    const active = st && st.active
+    if (typeof active !== 'string') return null
+    // Must be a plain absolute path in the same directory — never follow a
+    // sidecar file into somewhere unexpected.
+    if (!/^\/[A-Za-z0-9._\-/]*$/.test(active)) return null
+    if (path.dirname(active) !== path.dirname(basePath)) return null
+    return active
+  } catch { return null }
+}
+
+function resolveAuditLogPath() {
+  const base = baseAuditLogPath()
+  return rotatedActivePath(base) || base
+}
+
+let AUDIT_LOG_PATH = resolveAuditLogPath()
+
+// Creates the audit log directory and file so Coraza can open it, and
+// updates the effective path. Idempotent — safe to call before every apply.
+function ensureAuditLog() {
+  const attempted = []
+  // The rotated active path (when there is one) comes first: rotation has
+  // already pointed Coraza at it, and falling back to the base candidate
+  // here would silently undo the rotation.
+  const rotated = rotatedActivePath(baseAuditLogPath())
+  const candidates = rotated ? [rotated, ...auditLogCandidates()] : auditLogCandidates()
+  for (const candidate of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(candidate), { recursive: true })
+      // `a` creates the file if missing and never truncates an existing log.
+      fs.closeSync(fs.openSync(candidate, 'a'))
+      if (!isWritable(candidate)) throw new Error('not writable')
+
+      const fellBack = candidate !== (process.env.CORAZA_AUDIT_LOG || DEFAULT_AUDIT_LOG) && candidate !== rotated
+      AUDIT_LOG_PATH = candidate
+      module.exports.AUDIT_LOG_PATH = candidate
+      return { ok: true, path: candidate, fellBack }
+    } catch (e) {
+      attempted.push(`${candidate} (${e.code || e.message})`)
+    }
+  }
+  return {
+    ok: false,
+    attempted,
+    error: AUDIT_LOG_EXPLICIT
+      ? `CORAZA_AUDIT_LOG is set to ${process.env.CORAZA_AUDIT_LOG} but CatWAF cannot create or write it: ${attempted.join('; ')}.`
+      : `CatWAF could not prepare an audit log. Tried: ${attempted.join('; ')}.`,
+  }
+}
 
 const ADMIN_CLIENT_SCRIPT = `
 let body = ''
@@ -118,12 +252,32 @@ function oneOf(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback
 }
 
-function buildWAFBlock(waf) {
-  const lines = []
-  lines.push(WAF_MARKER_START)
-  lines.push('# CatWAF WAF Rules — auto-generated, do not edit manually')
-  lines.push('')
+// Builds just the `coraza_waf { ... }` directive block (no surrounding
+// markers) from the current WAF settings — shared by the single managed
+// WAF block (buildWAFBlock, below) and by proxy/generator.js, which embeds
+// the same protection into every auto-discovered route.
+// How a denied request is answered (ideas #19 and #58). `deny,status:<code>`
+// is the unchanged default; silent mode uses Coraza's `drop`, which closes
+// the connection without writing a status line at all — nothing for an
+// attacker's tooling to fingerprint, at the cost of a mistakenly blocked
+// visitor getting no explanation either.
+function denyAction() {
+  try {
+    const access = require('./settings').get('access')
+    if (access.block_response_mode === 'silent') return 'drop'
+    return `deny,status:${num(access.blocked_status_code, 403, { min: 100, max: 599 })}`
+  } catch {
+    return 'deny,status:403'
+  }
+}
 
+function extendedSettings(group) {
+  try { return require('./settings').get(group) } catch { return null }
+}
+
+function buildCorazaSnippet(waf) {
+  const lines = []
+  const deny = denyAction()
   lines.push('  coraza_waf {')
   lines.push('    load_owasp_crs')
   lines.push('    directives `')
@@ -146,10 +300,19 @@ function buildWAFBlock(waf) {
   lines.push(`      SecResponseBodyAccess ${waf.response_body_inspection ? 'On' : 'Off'}`)
   lines.push(`      SecRequestBodyLimit ${num(waf.max_request_body_size, 13107200, { min: 1024, max: 1073741824 })}`)
 
+  // CRS carries its own hardcoded 403 in the blocking-evaluation rules, so
+  // changing the deny response (#19/#58) means re-pointing those two rules
+  // as well as CatWAF's own. Only emitted when the response differs from the
+  // default, so an untouched install renders exactly what it did before.
+  if (deny !== 'deny,status:403') {
+    lines.push(`      SecRuleUpdateActionById 949110 "phase:2,${deny},log,auditlog"`)
+    lines.push(`      SecRuleUpdateActionById 959100 "phase:4,${deny},log,auditlog"`)
+  }
+
   let ruleId = 9100
   for (const ip of (waf.ip_blacklist || [])) {
     if (!isValidIpOrCidr(ip.ip)) continue
-    lines.push(`      SecRule REMOTE_ADDR "@ipMatch ${ip.ip}" "id:${ruleId++},phase:1,deny,status:403,msg:'CatWAF Blacklisted IP ${ip.ip}'"`)
+    lines.push(`      SecRule REMOTE_ADDR "@ipMatch ${ip.ip}" "id:${ruleId++},phase:1,${deny},msg:'CatWAF Blacklisted IP ${ip.ip}'"`)
   }
 
   ruleId = 9200
@@ -160,7 +323,7 @@ function buildWAFBlock(waf) {
 
   if (waf.geo_blocking && waf.geo_blocking.length > 0) {
     const codes = waf.geo_blocking.filter(cc => /^[A-Z]{2}$/.test(cc))
-    if (codes.length > 0) lines.push(`      SecRule GEO:COUNTRY_CODE "@pm ${codes.join(' ')}" "id:9001,phase:1,deny,status:403,msg:'CatWAF Geo Block'"`)
+    if (codes.length > 0) lines.push(`      SecRule GEO:COUNTRY_CODE "@pm ${codes.join(' ')}" "id:9001,phase:1,${deny},msg:'CatWAF Geo Block'"`)
   }
 
   ruleId = 9300
@@ -225,7 +388,7 @@ function buildWAFBlock(waf) {
     const pattern = waf.blocked_user_agents
       .map(u => escapeForDirective(String(u)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
       .join('|')
-    lines.push(`      SecRule REQUEST_HEADERS:User-Agent "@rx (?i)${pattern}" "id:9050,phase:1,deny,status:403,log,msg:'CatWAF Blocked Scanner UA'"`)
+    lines.push(`      SecRule REQUEST_HEADERS:User-Agent "@rx (?i)${pattern}" "id:9050,phase:1,${deny},log,msg:'CatWAF Blocked Scanner UA'"`)
   }
 
   lines.push(`      SecAuditEngine ${waf.audit_log ? 'RelevantOnly' : 'Off'}`)
@@ -234,11 +397,182 @@ function buildWAFBlock(waf) {
   lines.push(`      SecAuditLog ${AUDIT_LOG_PATH}`)
   lines.push('      SecAuditLogFormat JSON')
 
+  // Idea #62 — raw Coraza directives, by insertion context. Still inside the
+  // same validate-before-apply transaction as everything else, so a bad
+  // snippet fails exactly the way a bad structured setting does.
+  const raw = extendedSettings('raw_config')
+  if (raw && raw.enabled) {
+    for (const [label, body] of [['global', raw.waf_global], ['per-site', raw.waf_per_site]]) {
+      if (!body || !body.trim()) continue
+      lines.push(`      # ── unmanaged: raw Coraza directives (${label}) ──`)
+      for (const line of body.split('\n')) lines.push(`      ${line.replace(/[`\r]/g, '')}`)
+    }
+  }
+
   lines.push('    `')
   lines.push('  }')
+  return lines.join('\n')
+}
+
+// Idea #56 — per-path WAF bypass. Rendered as a matcher on the coraza_waf
+// directive itself, so an exempt path never enters inspection at all rather
+// than being inspected and then allowed. Only emitted when at least one
+// bypass path exists, which keeps the default output byte-identical.
+function corazaMatcherLines() {
+  const access = extendedSettings('access')
+  const paths = access && Array.isArray(access.waf_bypass_paths) ? access.waf_bypass_paths : []
+  const safe = paths.filter(p => typeof p === 'string' && p.startsWith('/') && !/[\s`"'{}\\]/.test(p))
+  if (!safe.length) return { matcher: null, lines: [] }
+  return {
+    matcher: '@catwaf_waf_scope',
+    lines: [
+      '  # Paths listed here are exempt from WAF inspection (false-positives.md).',
+      `  @catwaf_waf_scope not path ${safe.map(p => `"${p}"`).join(' ')}`,
+    ],
+  }
+}
+
+// `opts.backend` overrides the address the site extensions route CatWAF's own
+// hops to (the challenge endpoints and the `forward_auth` enforcement hop).
+// Passing `null` renders a block with no hop back into CatWAF at all, which is
+// what a throwaway sandbox needs: services/simulate.js stands up a private
+// Caddy that has no CatWAF API to call, and a hop to an unreachable address
+// makes every request 502 before it can reach the sandbox's sink.
+// `opts.recordReport === false` keeps such a render out of lastRenderReport(),
+// so a simulation cannot overwrite the live configuration's diagnostics.
+function buildWAFBlock(waf, opts = {}) {
+  const lines = []
+  lines.push(WAF_MARKER_START)
+  lines.push('# CatWAF WAF Rules — auto-generated, do not edit manually')
+  lines.push('')
+
+  const scope = corazaMatcherLines()
+  if (scope.matcher) lines.push(...scope.lines, '')
+
+  const snippet = buildCorazaSnippet(waf)
+  lines.push(scope.matcher ? snippet.replace('  coraza_waf {', `  coraza_waf ${scope.matcher} {`) : snippet)
+
+  // Everything the extended settings groups contribute to this site block.
+  // Rendering failures never throw: a group that cannot be expressed is
+  // recorded in lastRenderReport() and simply not emitted, because an
+  // invalid directive would fail `caddy validate` for the whole file.
+  const extended = renderSiteExtensions(waf, opts)
+  if (extended.length) lines.push('', ...extended)
+
   lines.push('')
   lines.push(WAF_MARKER_END)
   return lines.join('\n')
+}
+
+// The most recent render's diagnostics, surfaced by the API so the dashboard
+// can explain why a setting that is switched on is not in effect.
+let LAST_RENDER = { skipped: [], notes: [], at: null }
+
+function lastRenderReport() { return LAST_RENDER }
+
+function renderSiteExtensions(waf, opts = {}) {
+  const record = opts.recordReport !== false
+  try {
+    const siteRender = require('./render/site')
+    const context = currentSiteContext()
+    if (Object.hasOwn(opts, 'backend')) context.backend = opts.backend
+    const result = siteRender.build({ waf, ...context })
+    if (record) {
+      LAST_RENDER = {
+        skipped: result.skipped,
+        notes: result.notes,
+        at: new Date().toISOString(),
+      }
+    }
+    return result.lines.map(l => (l === '' ? '' : `  ${l}`))
+  } catch (e) {
+    if (record) LAST_RENDER = { skipped: [{ feature: 'render', reason: e.message }], notes: [], at: new Date().toISOString() }
+    return []
+  }
+}
+
+// What the renderer needs to know about the block it is being inserted into:
+// whether TLS directives make sense there, and which upstreams proxy tuning
+// should attach to.
+// Set by renderCaddyfile() so a preview reasons about the text being
+// rendered rather than whatever is currently on disk.
+let RENDER_SOURCE = null
+
+function currentSiteContext() {
+  let content = RENDER_SOURCE
+  if (content === null) {
+    try { content = readCaddyfile() } catch { return { tlsCapable: false, upstreams: [], backend: catwafBackendAddress() } }
+  }
+  const target = enclosingSiteBlock(content)
+  return {
+    tlsCapable: target ? target.addresses.some(a => /^https:\/\//.test(a) || /^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}(:\d+)?$/.test(a)) : false,
+    upstreams: target ? upstreamsIn(target.body) : [],
+    backend: catwafBackendAddress(),
+  }
+}
+
+function catwafBackendAddress() {
+  const host = process.env.CATWAF_INTERNAL_HOST || process.env.HOST || '127.0.0.1'
+  const port = Number(process.env.PORT || 8000)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null
+  return `${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`
+}
+
+// Every top-level block in the file, with its address list and body. Used to
+// find the block CatWAF patches and to reason about what can be rendered
+// into it.
+function topLevelBlocks(content) {
+  const global = globalOptionsRange(content)
+  const blocks = []
+  let depth = 0
+  let openIdx = -1
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i]
+    if (ch === '#') { while (i < content.length && content[i] !== '\n') i++; continue }
+    if (ch === '{') {
+      if (depth === 0) openIdx = i
+      depth++
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0 && openIdx !== -1) {
+        if (!global || openIdx !== global.start) {
+          const headStart = content.lastIndexOf('\n', openIdx) + 1
+          const head = content.slice(headStart, openIdx).trim()
+          blocks.push({
+            addresses: head.split(',').map(s => s.trim()).filter(Boolean),
+            start: openIdx,
+            end: i,
+            body: content.slice(openIdx + 1, i),
+          })
+        }
+        openIdx = -1
+      }
+      if (depth < 0) depth = 0
+    }
+  }
+  return blocks
+}
+
+function enclosingSiteBlock(content) {
+  const closeIdx = lastSiteBlockClose(content)
+  if (closeIdx === -1) return null
+  return topLevelBlocks(content).find(b => b.end === closeIdx) || null
+}
+
+// Pulls the upstream addresses out of a `reverse_proxy` line so proxy tuning
+// (#26-#31, #60) can be attached to the same backends the operator already
+// pointed the site at, without CatWAF having to be told them twice.
+function upstreamsIn(body) {
+  const out = []
+  for (const line of String(body || '').split('\n')) {
+    const m = /^\s*reverse_proxy\s+([^{#]+)/.exec(line)
+    if (!m) continue
+    for (const token of m[1].trim().split(/\s+/)) {
+      if (!token || token.startsWith('@') || token.includes('=')) continue
+      if (/^(?:(?:https?|h2c):\/\/)?(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])(?::\d{1,5})?$/.test(token)) out.push(token)
+    }
+  }
+  return [...new Set(out)]
 }
 
 
@@ -280,16 +614,75 @@ function ensureGlobalOrderDirective(content) {
   return `{\n    ${ORDER_DIRECTIVE}\n}\n\n${content}`
 }
 
-function patchWAFCaddyfile(waf) {
-  let content = readCaddyfile()
-  const newBlock = buildWAFBlock(waf)
+function replaceRegion(content, startMarker, endMarker, replacement) {
+  const startIdx = content.indexOf(startMarker)
+  const endIdx = content.indexOf(endMarker)
+  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) return null
+  return content.slice(0, startIdx) + replacement + content.slice(endIdx + endMarker.length)
+}
 
+// The managed global-options region. Rewritten wholesale on every apply, so
+// turning a setting off removes its directive instead of leaving it behind.
+function patchGlobalRegion(content) {
+  let report = { lines: [], skipped: [], notes: [] }
+  try { report = require('./render/global').build() } catch (e) {
+    report = { lines: [], skipped: [{ feature: 'global', reason: e.message }], notes: [] }
+  }
+  mergeRenderReport(report)
+
+  const hasRegion = content.includes(GLOBAL_MARKER_START) && content.includes(GLOBAL_MARKER_END)
+  if (!report.lines.length && !hasRegion) return content
+
+  const body = [GLOBAL_MARKER_START, ...report.lines.map(l => (l === '' ? '' : `    ${l}`)), `    ${GLOBAL_MARKER_END}`]
+  const region = body.join('\n')
+
+  if (hasRegion) return replaceRegion(content, GLOBAL_MARKER_START, GLOBAL_MARKER_END, region) ?? content
+
+  const global = globalOptionsRange(content)
+  if (!global) return content
+  const insertAt = global.end
+  return content.slice(0, insertAt) + `    ${region}\n` + content.slice(insertAt)
+}
+
+// The reject-unknown-Host catch-all (#55), as its own top-level block.
+function patchCatchAllRegion(content) {
+  let report = { lines: [], skipped: [], notes: [] }
+  try { report = require('./render/global').buildCatchAll() } catch (e) {
+    report = { lines: [], skipped: [{ feature: 'reject_unknown_host', reason: e.message }], notes: [] }
+  }
+  mergeRenderReport(report)
+
+  const hasRegion = content.includes(CATCHALL_MARKER_START) && content.includes(CATCHALL_MARKER_END)
+  if (!report.lines.length && !hasRegion) return content
+
+  const region = [CATCHALL_MARKER_START, ...report.lines, CATCHALL_MARKER_END].join('\n')
+  if (hasRegion) return replaceRegion(content, CATCHALL_MARKER_START, CATCHALL_MARKER_END, region) ?? content
+
+  const global = globalOptionsRange(content)
+  const insertAt = global ? global.end + 1 : 0
+  return content.slice(0, insertAt) + `\n\n${region}\n` + content.slice(insertAt)
+}
+
+function mergeRenderReport(report) {
+  LAST_RENDER = {
+    skipped: [...(LAST_RENDER.skipped || []), ...(report.skipped || [])],
+    notes: [...(LAST_RENDER.notes || []), ...(report.notes || [])],
+    at: new Date().toISOString(),
+  }
+}
+
+// Pure: takes the current Caddyfile text and returns what CatWAF would write,
+// without touching the filesystem. The diff preview (idea #50) and every
+// dry-run path go through this, so what is previewed is what is applied.
+function renderCaddyfile(content, waf) {
+  LAST_RENDER = { skipped: [], notes: [], at: new Date().toISOString() }
+  RENDER_SOURCE = content
+  let newBlock
+  try { newBlock = buildWAFBlock(waf) } finally { RENDER_SOURCE = null }
+
+  let out
   if (content.includes(WAF_MARKER_START) && content.includes(WAF_MARKER_END)) {
-    const startIdx = content.indexOf(WAF_MARKER_START)
-    const endIdx   = content.indexOf(WAF_MARKER_END)
-    const before = content.slice(0, startIdx)
-    const after  = content.slice(endIdx + WAF_MARKER_END.length)
-    content = before + newBlock + after
+    out = replaceRegion(content, WAF_MARKER_START, WAF_MARKER_END, newBlock)
   } else {
     const insertAt = lastSiteBlockClose(content)
     if (insertAt === -1) {
@@ -298,10 +691,18 @@ function patchWAFCaddyfile(waf) {
         'Add a site block (for example `:8081 { reverse_proxy 127.0.0.1:3000 }`) pointing at the application you want to protect, then apply again.'
       )
     }
-    content = content.slice(0, insertAt) + '\n' + newBlock + '\n' + content.slice(insertAt)
+    out = content.slice(0, insertAt) + '\n' + newBlock + '\n' + content.slice(insertAt)
   }
 
-  content = ensureGlobalOrderDirective(content)
+  out = ensureGlobalOrderDirective(out)
+  out = patchGlobalRegion(out)
+  out = patchCatchAllRegion(out)
+  return out
+}
+
+function patchWAFCaddyfile(waf) {
+  const content = renderCaddyfile(readCaddyfile(), waf)
+
   try {
     fs.writeFileSync(CADDYFILE_PATH, content, 'utf8')
   } catch (e) {
@@ -340,11 +741,27 @@ function firstLine(msg) {
   return String(msg || '').split('\n').find(l => l.trim()) || String(msg || '').trim()
 }
 
+// host:port for `caddy reload --address`, derived from CADDY_ADMIN_URL.
+function adminApiAddress() {
+  try {
+    const u = new URL(CADDY_ADMIN_URL)
+    return u.port ? `${u.hostname}:${u.port}` : u.hostname
+  } catch { return null }
+}
+
 function reloadCaddy() {
   const attempts = []
 
   try {
-    execFileSync('caddy', ['reload', '--config', CADDYFILE_PATH], { timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
+    // --address is REQUIRED: without it `caddy reload` always talks to the
+    // default admin endpoint 127.0.0.1:2019, regardless of CADDY_ADMIN_URL.
+    // That means a CatWAF instance (or a test) configured against a different
+    // admin endpoint would hijack whatever Caddy happens to own :2019 and
+    // overwrite its live configuration — silently dropping protection.
+    const args = ['reload', '--config', CADDYFILE_PATH]
+    const adminAddress = adminApiAddress()
+    if (adminAddress) args.push('--address', adminAddress)
+    execFileSync('caddy', args, { timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
     return { reloaded: true, error: null, method: 'caddy-binary' }
   } catch (e) {
     attempts.push(`local caddy binary: ${firstLine(e.stderr?.toString() || e.message)}`)
@@ -380,6 +797,42 @@ function getCaddyPid() {
   return null
 }
 
+// ─── Redaction ──────────────────────────────────────────────────────────
+//
+// The generated Caddyfile is not secret-free. render/site.js writes the
+// derived X-CatWAF-Enforce-Key (the only credential guarding the pre-auth
+// /api/enforce endpoint), the ACME dns-01 provider API token and the
+// basic-auth password hash into it as plaintext literals. Every other read
+// path for configuration goes through settings redact(), which blanks those
+// same fields because they are declared writeOnly — so anything that hands
+// the raw file text to a client has to blank them too.
+const REDACTED = '«redacted»'
+
+// Header names whose value is a credential rather than a routing hint.
+const SECRET_HEADER_RE = /(key|token|secret|password|authorization|credential)/i
+
+function redactCaddyfile(text) {
+  if (typeof text !== 'string' || !text) return ''
+  return text.split('\n').map(line => {
+    // header_up / header_down carrying a shared secret, e.g. the enforce key.
+    let m = line.match(/^(\s*header_(?:up|down)\s+)(\S+)(\s+)(.+)$/)
+    if (m && SECRET_HEADER_RE.test(m[2])) return `${m[1]}${m[2]}${m[3]}"${REDACTED}"`
+
+    // ACME dns-01: `dns <provider> "<api token>"`. A block-opening form
+    // (`dns <provider> {`) carries no inline credential and is left alone.
+    m = line.match(/^(\s*dns\s+)(\S+)(\s+)(.+)$/)
+    if (m && m[4].trim() !== '{') return `${m[1]}${m[2]}${m[3]}"${REDACTED}"`
+
+    // basic_auth credential line: `"user" "$2a$12$..."`. The username is kept
+    // — it is already shown in the settings UI — and only the hash is blanked.
+    m = line.match(/^(\s*"?[^"\s]+"?\s+)"?\$2[aby]\$[^"\s]*"?\s*$/)
+    if (m) return `${m[1]}"${REDACTED}"`
+
+    // Catch-all for any bcrypt hash that appears somewhere else.
+    return line.replace(/\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/g, REDACTED)
+  }).join('\n')
+}
+
 let reloadQueueTimer = null
 let reloadQueuePending = false
 function queueCaddyReload() {
@@ -396,10 +849,16 @@ function queueCaddyReload() {
 
 module.exports = {
   CADDYFILE_PATH, CADDYFILE_SOURCE, CORAZA_LIST_DIR, CADDY_ADMIN_URL, AUDIT_LOG_PATH,
+  DEFAULT_AUDIT_LOG, ensureAuditLog, auditLogStatus, auditLogCandidates,
+  baseAuditLogPath, rotatedActivePath, resolveAuditLogPath,
+  WAF_MARKER_START, WAF_MARKER_END,
+  GLOBAL_MARKER_START, GLOBAL_MARKER_END, CATCHALL_MARKER_START, CATCHALL_MARKER_END,
   detectCaddyfilePath, candidatePaths, scoreCaddyfilePath: scorePath,
-  lastSiteBlockClose, globalOptionsRange,
-  buildWAFBlock, patchWAFCaddyfile, readCaddyfile, reloadCaddy,
+  lastSiteBlockClose, globalOptionsRange, ensureGlobalOrderDirective,
+  topLevelBlocks, enclosingSiteBlock, upstreamsIn, currentSiteContext,
+  renderCaddyfile, lastRenderReport, denyAction, corazaMatcherLines,
+  buildWAFBlock, buildCorazaSnippet, patchWAFCaddyfile, readCaddyfile, reloadCaddy,
   isCaddyRunning, getCaddyModules, getCaddyPid,
-  applyToCaddy, queueCaddyReload,
+  applyToCaddy, queueCaddyReload, redactCaddyfile,
   isReloadPending: () => reloadQueuePending,
 }

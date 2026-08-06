@@ -164,6 +164,26 @@ async function waitForHttp(url, attempts = 60, delayMs = 250) {
       ['/threats', /threat|attack|severity|block/i],
       ['/logs', /log|request|method|status/i],
       ['/rules', /rule|crs|paranoia|id/i],
+
+      ['/protection/bans', /ban|refus|nothing is banned/i],
+      ['/protection/challenge', /challenge|visitor|gate/i],
+      ['/protection/threat-intel', /threat|intel|asn|reverse dns/i],
+      ['/protection/behavior', /behaviour|behavior|threshold|error/i],
+
+      ['/config/access', /access|host|method|deny/i],
+      ['/config/headers', /header|cors|cookie|compress/i],
+      ['/config/tls', /tls|certificate|acme/i],
+      ['/config/proxy', /proxy|origin|upstream/i],
+      ['/config/network', /network|address|proxy/i],
+      ['/config/advanced', /advanced|raw|plugin/i],
+
+      ['/system/jobs', /job|schedul|interval/i],
+      ['/system/caches', /cache|entries|clear/i],
+      ['/system/templates', /template|configuration|apply/i],
+      ['/system/reports', /report|export|range|request/i],
+      ['/system/backups', /backup|destination|snapshot/i],
+      ['/system/2fa', /two-factor|authenticat|password/i],
+      ['/system/telemetry', /telemetry|payload|collect/i],
     ]
 
     for (const [route, expect] of ROUTES) {

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # node:sqlite is used unflagged from Node 22.5; the suites pass
+      # --experimental-sqlite for the versions that still require it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix frontend ci
+
+      - name: Build the dashboard
+        run: |
+          npm run build
+
+      # The settings reference is generated from the schema. Checking it here
+      # is what stops docs/settings.md from silently drifting out of date.
+      - name: Settings reference is up to date
+        run: node --experimental-sqlite scripts/gen-settings-docs.js --check
+
+      # Suites that need a Caddy built with Coraza, or a Docker daemon, detect
+      # their absence and skip rather than fail. Everything below runs here.
+      - name: Unit and API tests
+        run: npm run test:unit
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # Advisory: a new CVE in a transitive dependency should show up here,
+      # but it must not block an unrelated pull request from merging.
+      - run: npm audit --audit-level=high || true
+      - run: npm --prefix frontend ci && npm --prefix frontend audit --audit-level=high || true

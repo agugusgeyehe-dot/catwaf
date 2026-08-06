@@ -270,6 +270,20 @@ async function cmdAudit(flags) {
   const requestLog = require(path.join(BACKEND, 'services', 'requestLog.js'))
   const rules = require(path.join(BACKEND, 'services', 'rules.js'))
 
+  // Pull in anything Coraza has written since the last read. The API server
+  // does this on a timer, but it may not be running — a Lite install, or a
+  // host-native box where `catwaf auto` started only the proxy. Without this
+  // the CLI reports zero events while the audit log is filling up. Offsets
+  // are persisted, so this is cheap and safe to call repeatedly.
+  try { requestLog.ingestNewEntries() } catch { /* reporting must not fail on ingest */ }
+
+  // Housekeeping runs here too: on a Lite or host-native install the API
+  // server may never run, and the audit log would otherwise grow forever.
+  const auditLogSvc = require(path.join(BACKEND, 'services', 'auditLog.js'))
+  try { auditLogSvc.maintain() } catch { /* never block reporting */ }
+  let auditLogStatus = null
+  try { auditLogStatus = auditLogSvc.status() } catch { /* status is advisory */ }
+
   const windowSpec = typeof flags.last === 'string' ? flags.last : '24h'
   const sinceMs = requestLog.parseWindow(windowSpec)
   if (sinceMs == null) return fail(`"${windowSpec}" is not a valid window. Use forms like 30m, 24h, 7d.`)
@@ -288,6 +302,7 @@ async function cmdAudit(flags) {
       attack_type: r.attack_type, severity: r.severity, anomaly_score: r.score,
       rule_ids: r.rule_ids, client_ip: r.ip, status: r.status,
     })),
+    audit_log: auditLogStatus,
   }
 
   if (out(payload, flags.json)) return 0
@@ -304,6 +319,19 @@ async function cmdAudit(flags) {
 
   if (summary.anomaly_score.scored_events) {
     kv('Anomaly score', `avg ${summary.anomaly_score.average}, max ${summary.anomaly_score.max} (${summary.anomaly_score.scored_events} scored)`)
+  }
+
+  if (auditLogStatus) {
+    const a = auditLogStatus
+    const mb = n => `${(n / 1024 / 1024).toFixed(1)}MB`
+    const pctColor = a.percentOfMax >= 90 ? C.red : a.percentOfMax >= 75 ? C.yellow : C.dim
+    console.log('\n  ' + c('Audit log', C.bold))
+    kv('  Active file', a.activePath)
+    kv('  Size', `${mb(a.sizeBytes)} of ${a.retention.maxSizeMb}MB  ` + c(`(${a.percentOfMax}%)`, pctColor))
+    kv('  Rotated files', `${a.rotatedFiles} (max ${a.retention.maxFiles}, total ${mb(a.totalBytes)})`)
+    kv('  Retention', `${a.retention.retentionDays} days`)
+    if (!a.writable) console.log(c('    ! the audit log directory is not writable — rotation cannot run', C.red))
+    if (a.rotationPending) console.log(c('    ! a rotation was interrupted; it will be recovered on the next run', C.yellow))
   }
 
   if (summary.total_requests === 0) {
@@ -736,7 +764,244 @@ async function cmdDiff(flags) {
   return 0
 }
 
+// Fields we surface for a container come from the shared discovery
+// projection, so `--json` here and the dashboard's API cannot drift apart
+// about which fields are safe to emit (raw env/labels never are — they carry
+// database passwords and API keys).
+const { summarizeContainer } = require(path.join(BACKEND, 'services', 'discovery', 'summary.js'))
+
+// Renders the outcome of the protect pipeline. `protected` is printed only
+// for routes whose protection was PROVEN by proxy/verify.js — a generated
+// route is never reported as a protected site.
+// ── Zero-config reporting ─────────────────────────────────────────────
+// The user should not need to know what a Docker network, an upstream, a
+// reverse proxy or a paranoia level is. The default output is four steps
+// and a verdict; every implementation detail is available behind
+// --verbose or --json, and surfaces automatically only when something went
+// wrong and the user has to act.
+
+function step(ok, label) {
+  const mark = ok === true ? c('[✓]', C.green) : ok === false ? c('[✗]', C.red) : c('[·]', C.dim)
+  console.log(`${mark} ${label}`)
+}
+
+function renderDetail(result) {
+  for (const ctr of (result.containers || []).map(summarizeContainer)) renderContainer(ctr)
+  for (const r of result.routes || []) {
+    console.log(c(`  ${r.name}: :${r.listenPort} → ${r.upstream} (${r.upstreamBasis})`, C.dim))
+    for (const w of r.warnings || []) console.log(c(`    ! ${w}`, C.yellow))
+  }
+}
+
+// Turns the pipeline's failure state into a sentence the user can act on.
+function explainBlockers(result) {
+  const lines = []
+  for (const s of result.skipped || []) {
+    lines.push(`CatWAF found "${s.name}" but could not connect to it:`)
+    for (const d of (s.diagnostics && s.diagnostics.length ? s.diagnostics : [s.reason])) {
+      lines.push(`  • ${d}`)
+    }
+  }
+  for (const v of result.verification?.results || []) {
+    if (!v.protected) lines.push(`"${v.name}" is not protected: ${v.reason}`)
+  }
+  return lines
+}
+
+async function runProtect(flags, { quietHeader = false } = {}) {
+  const protectSvc = require(path.join(BACKEND, 'services', 'proxy', 'protect.js'))
+  const state = require(path.join(BACKEND, 'services', 'state.js'))
+  const db = require(path.join(BACKEND, 'services', 'db.js'))
+
+  const dryRun = !!flags['dry-run']
+  const verbose = !!flags.verbose
+  const skipVerify = !!flags['no-verify']
+
+  // Starting the proxy is part of protecting the site: a written config
+  // serves nothing until something is listening. Injected here so the
+  // service layer stays out of backend/services.
+  const startProxy = () => require(path.join(PROJECT_ROOT, 'src', 'tui', 'service.js')).startWaf()
+
+  const result = await protectSvc.protect({ state, db, dryRun, skipVerify, startProxy })
+
+  // ── Environment ────────────────────────────────────────────────────
+  if (!result.ok && result.stage === 'discovery') {
+    if (flags.json) { console.log(JSON.stringify({ ok: false, code: result.code, error: result.error }, null, 2)); return 1 }
+    console.log('')
+    step(false, 'Environment detected')
+    console.log(`\n${result.error}\n`)
+    console.log(c('CatWAF protects applications it can see. Start your application with Docker,', C.dim))
+    console.log(c('or run `catwaf auto --help` for other discovery modes.\n', C.dim))
+    return 1
+  }
+
+  if (flags.json) {
+    const payload = {
+      ok: result.ok, stage: result.stage, dryRun,
+      containers: (result.containers || []).map(summarizeContainer),
+      routes: result.routes || [], skipped: result.skipped || [],
+      verification: result.verification || null,
+      backup: result.backup || null, reloaded: result.reloaded ?? null,
+      proxy: result.proxy || null,
+      protected: !!result.verification?.allProtected,
+    }
+    console.log(JSON.stringify(payload, null, 2))
+    if (!result.ok) return 1
+    if (dryRun || skipVerify) return 0
+    return result.verification?.allProtected ? 0 : 1
+  }
+
+  console.log('')
+  step(true, 'Environment detected')
+
+  // ── Application ────────────────────────────────────────────────────
+  const found = (result.webApps || []).length
+
+  // A pipeline failure is reported as a failure of the stage that actually
+  // failed. Checking "did we find anything" first would report an apply or
+  // reload error as "no web application found", hiding the real cause.
+  if (!result.ok && result.stage !== 'discovery') {
+    step(found > 0, `Web application detected${found ? c(`  ${(result.webApps || []).map(a => a.composeService || a.name).join(', ')}`, C.dim) : ''}`)
+    step(false, 'WAF configured')
+    console.log('\n' + c(result.error || 'CatWAF could not apply the protected configuration.', C.red))
+    if (result.message) console.log(c(result.message, C.yellow))
+    console.log('\n' + c('Your website is NOT protected.', C.bold, C.red))
+    console.log(c('Your previous configuration was left untouched.\n', C.dim))
+    if (verbose) renderDetail(result)
+    return 1
+  }
+
+  if (!found) {
+    step(false, 'Web application detected')
+    console.log('\n' + c('CatWAF found no web application to protect.', C.yellow))
+    console.log(c('Start your website (for example `docker compose up -d`), then run `catwaf start` again.\n', C.dim))
+    if (verbose) renderDetail(result)
+    return 0
+  }
+
+  const names = (result.webApps || []).map(a => a.composeService || a.name)
+  step(true, `Web application detected${found > 1 ? ` (${found})` : ''}` + c(`  ${names.join(', ')}`, C.dim))
+
+  if (result.noRoutes || !result.routes.length) {
+    step(false, 'WAF configured')
+    console.log('\n' + c('CatWAF could not put itself in front of your application.', C.yellow) + '\n')
+    for (const line of explainBlockers(result)) console.log('  ' + line)
+    console.log('\n' + c('Your website is NOT protected.', C.bold, C.red) + '\n')
+    if (verbose) renderDetail(result)
+    return 1
+  }
+
+  if (dryRun) {
+    step(null, 'WAF configured' + c('  (dry run — nothing was changed)', C.dim))
+    console.log('')
+    for (const r of result.routes) {
+      console.log(`  ${c(r.name, C.cyan)} would be protected at ${c('http://localhost:' + r.listenPort, C.green)}`)
+    }
+    console.log('\n' + c('Dry run complete. Re-run without --dry-run to protect it.', C.dim) + '\n')
+    if (verbose) renderDetail(result)
+    return 0
+  }
+
+  step(true, 'WAF configured' + c('  Coraza + OWASP CRS', C.dim))
+  if (result.proxyStarted?.ok) {
+    step(true, 'WAF proxy started' + c(`  via ${result.proxyStarted.manager || 'process'}`, C.dim))
+  }
+
+  // ── Verification ───────────────────────────────────────────────────
+  if (skipVerify) {
+    step(null, 'Protection verified' + c('  (skipped with --no-verify)', C.dim))
+    console.log('\n' + c('Routes are applied but UNVERIFIED — CatWAF has not confirmed traffic passes through the WAF.', C.yellow) + '\n')
+    return 0
+  }
+
+  const v = result.verification
+  if (v?.allProtected) {
+    step(true, 'Protection verified')
+    console.log('\n' + c('Your website is protected.', C.bold, C.green) + '\n')
+    for (const r of result.routes) {
+      console.log(`  ${c(r.name, C.cyan)}  →  ${c('http://localhost:' + r.listenPort, C.green)}`)
+    }
+    const bypasses = result.routes.filter(r => r.bypassPort)
+    if (bypasses.length) {
+      console.log('')
+      for (const r of bypasses) {
+        console.log(c(`  Note: "${r.containerName}" is still directly reachable on port ${r.bypassPort},`, C.yellow))
+        console.log(c(`  which skips the WAF. Stop publishing that port to close the gap.`, C.yellow))
+      }
+    }
+    console.log('')
+    if (verbose) {
+      renderDetail(result)
+      if (result.backup) console.log(c(`  Previous configuration backed up: ${result.backup}`, C.dim))
+    }
+    return 0
+  }
+
+  step(false, 'Protection verified')
+  console.log('\n' + c('Your website is NOT protected.', C.bold, C.red) + '\n')
+  for (const line of explainBlockers(result)) console.log('  ' + line)
+  console.log('')
+  if (result.backup) console.log(c(`Previous configuration backed up: ${result.backup}`, C.dim))
+  if (!result.reloaded) console.log(c(`The proxy did not reload: ${result.reloadError || 'unknown'}`, C.yellow))
+  console.log('')
+  if (verbose) renderDetail(result)
+  return 1
+}
+
+function renderContainer(ctr) {
+  if (ctr.incomplete) {
+    console.log(`${c('!', C.yellow)} ${ctr.name}`)
+    console.log(c('  Incomplete metadata — skipped', C.dim) + '\n')
+    return
+  }
+  if (!ctr.isWeb) {
+    console.log(`${c('○', C.dim)} ${ctr.name}`)
+    console.log(ctr.fpmBackendFor
+      ? c(`  PHP-FPM backend for ${ctr.fpmBackendFor.join(', ')}`, C.dim)
+      : c('  No HTTP service detected', C.dim))
+    console.log('')
+    return
+  }
+  console.log(`${c('✓', C.green)} ${ctr.name}`)
+  if (ctr.webServer) {
+    const conf = ctr.webServerConfidence != null ? c(`  (confidence ${ctr.webServerConfidence}%)`, C.dim) : ''
+    console.log(`  Web server: ${c(ctr.webServer, C.cyan)}${conf}`)
+  }
+  if (ctr.runtime) console.log(`  Runtime: ${c(ctr.runtime, C.cyan)}`)
+  if (ctr.fastcgiBackend) {
+    const inferred = ctr.fastcgiBasis === 'network-inference' ? c('  (inferred from network topology)', C.dim) : ''
+    console.log(`  PHP-FPM backend: ${c(ctr.fastcgiBackend, C.cyan)}${inferred}`)
+  }
+  if (ctr.framework) console.log(`  Framework: ${c(ctr.framework, C.cyan)}`)
+  if (ctr.port) {
+    const how = ctr.reachability === 'host-published' ? c('  (published to host)', C.dim)
+      : ctr.reachability === 'docker-internal' ? c('  (Docker-internal)', C.dim)
+      : c('  (not reachable)', C.yellow)
+    console.log(`  Port: ${c(String(ctr.port), C.cyan)}${how}`)
+  }
+  if (ctr.networks.length) console.log(`  Network: ${c(ctr.networks.join(', '), C.cyan)}`)
+  if (ctr.phpConfidence != null) console.log(`  PHP confidence: ${c(ctr.phpConfidence + '%', C.cyan)}`)
+  console.log('')
+}
+
+async function cmdAuto(flags) {
+  return await runProtect(flags)
+}
+
+// `catwaf start` — the actual "put my website behind CatWAF" command.
+async function cmdStartProtect(flags) {
+  if (flags['no-auto']) return 0
+  return await runProtect(flags)
+}
+
+// The settings, bans, template, report, job, backup, cache and two-factor
+// commands live in their own module to keep this one readable; they are
+// re-exported here so bin/catwaf.js has a single `ext()` surface to call.
+const configCommands = require('./configCommands.js')
+
 module.exports = {
   cmdExplain, cmdSimulate, cmdReplay, cmdRules, cmdAudit,
   cmdMode, cmdParanoia, cmdHealth, cmdSecurityTest, cmdConfigSub, cmdDiff,
+  cmdAuto, cmdStartProtect, runProtect,
+  ...configCommands,
 }

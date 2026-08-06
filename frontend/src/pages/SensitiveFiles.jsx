@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
-import { SectionTitle, Skeleton } from '../components/ui.jsx'
-import { ShieldAlert, Search, Ban, Eye, RefreshCw, FolderOpen, FileCode, File, Lock, CheckCircle, Shield, ShieldCheck, ShieldX, CircleSlash } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { SectionTitle } from '../components/ui.jsx'
+import { ShieldAlert, Search, Ban, Eye, RefreshCw, FolderOpen, File, Lock, CheckCircle, Shield, ShieldCheck, ShieldX, CircleSlash } from 'lucide-react'
 import { api } from '../utils/api.js'
 
 const SFL_META = [

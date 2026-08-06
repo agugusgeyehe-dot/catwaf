@@ -9,6 +9,217 @@ public release. Those entries are preserved below under the release they belong 
 numbers themselves were retired, not the history. Nothing here has been deleted or
 rewritten, only re-filed.
 
+## [Unreleased] — Release hardening
+
+Fixes for the problems that stopped CatWAF from being installable and usable by
+someone who is not the person who wrote it: signing in, reaching the dashboard
+from an address other than the one it was set up on, and a default that made
+every protected site depend on the CatWAF admin process.
+
+### Security
+
+- **Signing out did not end the session.** `session.close()` deleted the session
+  record, but `touch()` treats a missing record as valid — deliberately, so a
+  token that predates the store or survived a restart is not mistaken for an
+  attack. The result was that the JWT stayed usable for its full lifetime after
+  the operator pressed *Sign out*, so anyone holding a copy kept their access.
+  Explicit revocation is now recorded separately from session tracking and
+  checked before anything else, including `/api/sessions/revoke-all`. Entries
+  expire when the token would have anyway, so the list cannot grow unbounded.
+- **The dashboard never called `POST /api/auth/logout`.** It cleared its own
+  localStorage and stopped there — so even with the fix above, nothing was
+  revoked. It now calls the endpoint, and still clears local state if the call
+  fails, because a logout must not be blocked by an unreachable server.
+- **`tools_fingerprint` now ships disabled.** Any enabled runtime-enforcement
+  feature renders a `forward_auth` hop from Caddy into CatWAF's API, and Caddy
+  reads a failed dial as a denial — so with this on by default, stopping the
+  CatWAF API returned **502 to every visitor of every protected site**. The
+  documented "fails open" guarantee only ever covered errors CatWAF could
+  *answer*. Turning it off costs no baseline detection: a default install still
+  refuses known scanner user-agents twice inside Caddy, via CatWAF rule `9050`
+  and the OWASP CRS `913` group. It remains one command away
+  (`catwaf settings tools_fingerprint enabled=true`), which is now a deliberate
+  trade rather than an inherited one. Guarded by `test/render.test.js` and
+  `test/waf-e2e.test.js`; verified manually — with the API stopped, protected
+  sites still serve 200 and still block 403.
+
+### Fixed
+
+- **The login loop.** `AuthProvider.login()` dispatched `catwaf-auth-changed`,
+  whose handler re-verified the session it had just created. Every failure of
+  that check — including one that never reached the server — ran through a
+  single `.catch(() => setUser(null))`, discarding the session and returning to
+  the login screen. Only a real rejection from the server (401/403) ends a
+  session now; a transport failure leaves it intact and surfaces the reason.
+- **`ECONNREFUSED` shown as "Failed to fetch".** Every call in the API client
+  goes through one wrapper that turns a transport failure into
+  `CatWAF API is unavailable. Check that the CatWAF backend is running
+  (\`catwaf status\`), then try again.` with the code `API_UNREACHABLE`. When a
+  signed-in operator's backend goes away they get a screen that says so and
+  offers a retry, rather than a login form that cannot succeed.
+- **The dashboard only worked from the exact URL recorded at setup.** Two
+  independent causes, both fixed:
+  - CORS refused any origin not in `CORS_ORIGIN`, including the server's *own*
+    address. A request whose `Origin` is the server that answered it is not a
+    cross-origin request and is now always allowed; `CORS_ORIGIN` still governs
+    genuinely cross-origin callers.
+  - The CSP sent `upgrade-insecure-requests` unconditionally. Browsers exempt
+    `localhost` and `127.0.0.1` as trustworthy origins but **not** a LAN
+    address, so on `http://192.168.x.y:8000` every asset and API call was
+    upgraded to `https://` against a plain-HTTP server and the dashboard could
+    not finish loading. That directive and HSTS are now sent only where HTTPS
+    is real (`DOMAIN` set, or `CATWAF_HTTPS=true`).
+- **`catwaf start` reported success before CatWAF was up.** It returned as soon
+  as the process was spawned, so a server that died a second later — port in
+  use, unwritable database directory, missing `JWT_SECRET` — still printed
+  `✓ CatWAF started`, and the next thing the operator saw was the dashboard
+  failing to connect. `start` and `restart` now wait for `/healthz`, print the
+  dashboard URL on success, and on failure print the reason and the tail of the
+  CatWAF log. `catwaf status` no longer needs to be run to find out.
+- **A failed login tore down the app around the login form.** Any 401 cleared
+  the session and fired `catwaf-auth-changed`; that now excludes the login
+  endpoint itself, where a 401 just means the password was wrong.
+- **Simulation reported benign requests as unserved.** The sandbox in
+  `services/simulate.js` embedded the live WAF block, including the
+  `forward_auth` hop. The sandbox has no CatWAF behind it, so Caddy answered
+  502 and `upstreamReached` was always false. `buildWAFBlock()` takes a
+  `backend` override and the sandbox renders with no hop.
+- **`npm run test:e2e` could not start Caddy** for the same reason — the test
+  proving Coraza is in the request path was failing.
+- **A detected PHP application's evidence rendered as `[object Object]`.** The
+  PHP detector emits scoring objects where the other detectors emit strings.
+- **The first-run wizard passed `{ quick: true }`**, an option `discover()`
+  never had, so it ran the full HTTP-probing pass instead of the quick one.
+
+### Added
+
+- **`/api/apps` — the application pipeline over HTTP.** `discover`, `preview`,
+  `protect` and `verify` were reachable only from `catwaf auto` and the test
+  suite. A thin transport over the existing `backend/services/discovery/` and
+  `backend/services/proxy/` — no second implementation, so the CLI and the API
+  cannot disagree about whether a site is protected. Protect is admin-only and
+  audited; runs are serialised so two cannot race the same generated region.
+  Documented in `openapi.yaml`.
+- **`test/auth-flow.test.js`** — 29 checks driving a real browser against a real
+  backend: signing in over `127.0.0.1`, `localhost` and the machine's LAN
+  address; staying signed in; surviving a reload and a backend restart; the
+  API-unavailable screen; invalid credentials; and a signed-out token being
+  refused when replayed.
+- **`test/apps-api.test.js`** — 37 checks over the new API, including that a
+  preview never reports protection.
+- **CI** (`.github/workflows/ci.yml`): the dashboard builds, the settings
+  reference is checked against the schema, and the unit and API suites run on
+  every push. Plus issue templates and a private security-reporting link.
+
+### Changed
+
+- `README`, `CHANGELOG`, `CONTRIBUTING`, `SECURITY`, `ROADMAP` and `TRADEMARKS`
+  are back at the repository root, where GitHub renders them and where the
+  README's own relative links already pointed. `docs/` keeps the technical
+  documentation.
+- `.gitignore` now covers `data/backups/`, `data/logs/` and rotated Coraza
+  audit logs.
+- `CATWAF_HTTPS` is a new environment variable: `true` forces HSTS and
+  `upgrade-insecure-requests` on for a deployment behind a TLS terminator
+  CatWAF cannot detect, `false` forces them off.
+
+## [Unreleased] — The configuration and protection layer
+
+CatWAF gains a declarative settings layer covering roughly 290 switches across 38
+groups, a runtime protection layer that decides about a *client* before the rule
+engine inspects the *request*, and the operational surface to run both.
+
+Everything new is **opt-in**. A default install renders a byte-identical Caddyfile to
+the one it rendered before, which `test/render.test.js` guards directly.
+
+### Added
+
+- **Settings layer.** One declarative schema drives validation, the API, the CLI, the
+  dashboard controls, preview, and snapshot/rollback. Adding a setting is a schema entry
+  and a renderer line; everything else follows. Field validators are the Caddyfile
+  injection boundary and *refuse* quotes, braces, backticks and newlines rather than
+  escaping them. See [`docs/settings.md`](docs/settings.md), generated from the schema.
+- **Preview before apply.** `PATCH /api/settings/<group>` has a `/preview` sibling, and
+  `catwaf settings <group> --preview field=value` prints a `diff -u` of the generated
+  Caddyfile. Nothing is written.
+- **Protection layer** — the challenge gate (cookie, JavaScript proof-of-work, a
+  self-hosted SVG captcha, or reCAPTCHA/hCaptcha/Turnstile/mCaptcha), behavioural
+  banning, ASN and forward-confirmed rDNS rules, a greylist tier, subscribed community
+  blocklists, DNSBL, a CrowdSec-style bouncer client, a shared threat network, and
+  optional active client probing. All off by default.
+  See [`docs/protection.md`](docs/protection.md).
+- **Unified ban store.** Every feature that can stop an address writes to one place, so
+  "why is this visitor blocked and how do I let them back in" has one answer.
+  `catwaf bans`, and **Protection → Active Bans** in the dashboard.
+- **Network and access control** — mTLS, basic auth, general real-IP/trusted-proxy
+  handling (Cloudflare is now one preset of it rather than a special case), PROXY
+  protocol, connection limits, and a configurable deny status.
+- **TLS** — self-signed fallback so a site is on HTTPS from the first request, validated
+  custom certificate upload, DNS-01 and wildcards, ACME fallback and retry, three
+  protocol profiles. See [`docs/tls.md`](docs/tls.md).
+- **Reverse proxy and origin** — WebSocket policy, gRPC, response caching, forward auth,
+  failover, HTTP/2 and HTTP/3, and static-folder or PHP-FPM origins, so CatWAF can serve
+  a site itself rather than needing something to sit in front of.
+- **Content and headers** — header presets, CORS, cookie-flag rewriting, compression,
+  client caching, HTML injection, generated `robots.txt` and `security.txt`, error pages
+  and redirects. These feed the security score.
+- **Operations** — one scheduler for every timed task (`catwaf jobs`), backups
+  (`catwaf backup`), a Prometheus endpoint ([`docs/metrics.md`](docs/metrics.md)),
+  opt-in telemetry that shows you the exact payload it would send, configuration
+  templates (`catwaf template`), cache housekeeping (`catwaf cache`) and CSV/HTML
+  reports (`catwaf report`).
+- **Two-factor login.** RFC 6238 TOTP implemented directly rather than added as a
+  dependency, with single-use recovery codes and replay protection. `catwaf 2fa`, and
+  **System → Two-Factor** in the dashboard, which renders the enrollment QR code from a
+  QR encoder written in-tree for the same reason.
+- **Data-only plugins.** A manifest may declare settings defaults, knowledge entries and
+  constrained Caddy directive templates. It may not declare code, and a manifest that
+  tries is *refused* rather than ignored. See [`docs/plugins.md`](docs/plugins.md).
+- **`catwaf doctor` reports Caddy's real capabilities** — which optional modules the
+  installed build has, and anything switched on that could not be rendered because of a
+  missing one. This is the fastest answer to "I enabled it, why is nothing happening?".
+- Dashboard pages for all of the above, plus the two-factor step the login form now
+  needs.
+- `test/protection-units.test.js` (TOTP against RFC 6238's published vectors, feed
+  parsing, ban CIDR matching and escalation, diff correctness, the plugin validator,
+  challenge proof-of-work and token binding), `test/qr.test.js` (decodes the encoder's
+  own output and checks the Reed-Solomon syndromes), `test/extensions.test.js` and
+  `test/render.test.js` (six configurations validated by the real `caddy` binary).
+
+### Fixed
+
+- **A CIDR ban was not enforced until its cache expired.** Range bans are served from a
+  short-lived cache that writes did not invalidate, so for up to five seconds an address
+  CatWAF had just decided to refuse still got through. Adding, extending or lifting a
+  range ban now drops that cache immediately.
+- **The TOTP code used to confirm enrollment could be replayed to log in** for the
+  remainder of its 30-second window. Confirmation now spends the code, as a login does.
+
+### Changed
+
+- Three new SQLite tables (`active_bans`, `ban_history`, `list_entries`), created on
+  open — an existing database upgrades on first boot with no migration step.
+- `/api/enforce` and `/catwaf-challenge` are mounted outside the rotating admin path,
+  because Caddy and unverified visitors need a fixed URL. Each carries its own
+  authentication. `/api/enforce` **fails open**: every error path answers allow, because
+  `forward_auth` reads a non-2xx as "deny" and would otherwise take the protected site
+  down on any operational hiccup.
+- The knowledge base now points at the switches that fix the problems it describes —
+  `access.reject_unknown_host` for origin exposure, `access.waf_bypass_paths` for an
+  endpoint that a CRS rule keeps flagging.
+- New optional environment variables, all documented in `.env.example`:
+  `CATWAF_EXTRA_HOSTS`, `CATWAF_ASN_MAP`, `CATWAF_PLUGIN_KEYS`, `CATWAF_INTERNAL_HOST`.
+
+### Notes
+
+- `mtls.verify_depth` and `access.file_cache_size` are recorded but not renderable —
+  Caddy exposes no equivalent. They report themselves as skipped rather than silently
+  doing nothing.
+- Features needing an optional Caddy module (response caching, HTML injection, per-IP
+  connection limiting, DNS-01) render only when the installed build has it. Otherwise
+  they appear in the skipped report with a fix hint, which the dashboard and
+  `catwaf doctor` both surface.
+
 ## [1.0.1] — 2026-07-30 — Editions, installer, and a security pass
 
 CatWAF now ships in two editions, gains the installer the README has always pointed at,

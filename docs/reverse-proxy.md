@@ -51,7 +51,7 @@ If you're protecting more than one app, give each its own site block in the same
 ## Checking it actually took effect
 
 - `GET /api/diagnostics` (or **Setup Diagnostics** in the sidebar) checks that the Caddyfile actually contains a `coraza_waf` block and that `order coraza_waf first` is present — a request can silently sail through Coraza entirely without that ordering directive.
-- `GET /api/caddy/status` reports whether Caddy is running and returns the current Caddyfile content, if you want to eyeball it directly.
+- `GET /api/caddy/status` reports whether Caddy is running and returns the current Caddyfile content, if you want to eyeball it directly. The Caddyfile body is admin-only — a read-only `viewer` gets the running/path fields with `caddyfile` empty — and secrets rendered into it (the `X-CatWAF-Enforce-Key` header, the ACME dns-01 API token, basic-auth password hashes) come back redacted. Read the file on disk if you need the literal values.
 - The three `curl` commands in the main README's Quick Start section are the fastest real-world check — if none of them get blocked, start with the linter.
 
 
