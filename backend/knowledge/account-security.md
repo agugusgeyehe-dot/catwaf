@@ -19,7 +19,7 @@ There's currently no in-dashboard way to change your password once it's set. If 
 
 ## Multiple accounts
 
-This edition supports one admin account, for one site owner. It doesn't include team management or additional logins — that's intentionally out of scope for the free, single-owner edition.
+`catwaf --setup` creates one admin account to get you started, but you're not limited to it. From the server, `catwaf user add <username> --role admin|viewer` creates another login — `admin` can change protection settings, `viewer` can only look. Manage them with `catwaf user list`, `catwaf user role`, `catwaf user passwd` and `catwaf user remove`. There's no in-dashboard way to do this yet (see above) — it's a server-side, CLI/API-only capability for now.
 
 ## What's actually protecting your login
 
