@@ -86,8 +86,13 @@ section('CLI: version and edition reporting')
   const pkg = require(path.join(ROOT, 'package.json'))
   const v = cli(['version'])
   check('`catwaf version` exits 0', v.code === 0, v)
-  check('`catwaf version` prints 1.0.1', v.out.trim() === '1.0.1', v.out.trim())
-  check('CLI version matches package.json', v.out.trim() === pkg.version)
+  // Asserted as a shape rather than a literal. A hardcoded version here has to
+  // be hand-edited every release and fails the whole suite when someone forgets,
+  // which teaches people to edit the test rather than check the claim. The
+  // claim worth checking is that the CLI prints a bare semver and that it is
+  // the same one the package manifests declare — the next two checks.
+  check('`catwaf version` prints a bare semver', /^\d+\.\d+\.\d+$/.test(v.out.trim()), v.out.trim())
+  check('CLI version matches package.json', v.out.trim() === pkg.version, v.out.trim())
 
   const frontendPkg = require(path.join(ROOT, 'frontend', 'package.json'))
   check('frontend package.json version matches', frontendPkg.version === pkg.version, frontendPkg.version)
@@ -223,7 +228,7 @@ section('GeoIP: never fabricates a location')
   }
 
   check('lookup never throws on hostile input', (() => {
-    for (const bad of [Symbol.iterator ? ' ' : '', '‮', 'a'.repeat(10000)]) {
+    for (const bad of [Symbol.iterator ? '\x00' : '', '‮', 'a'.repeat(10000)]) {
       try { geoip.lookup(bad) } catch { return false }
     }
     return true
@@ -327,8 +332,18 @@ section('setup.sh')
   check('rejects a too-short CATWAF_ADMIN_PASSWORD',
     short.code !== 0 && /at least 8/.test(short.out), short.out.slice(0, 120))
 
-  const valid = sh(['--full', '--dir', '/opt/catwaf', '--domain', 'example.com', '--admin-user', 'admin'])
-  check('a valid argument set passes validation', /must run as root/.test(valid.out), valid.out.slice(0, 120))
+  // This case proves validation ACCEPTS a good argument set, using the
+  // "must run as root" check as the sentinel that execution got that far.
+  // As root that sentinel does not fire and the installer simply proceeds —
+  // so running the suite under sudo really did execute setup.sh against
+  // --dir /opt/catwaf, creating directories on the live system. A test must
+  // never install anything. There is no sentinel to observe as root, so skip.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    console.log('  SKIP  running as root — this case would execute the installer instead of stopping at the root check.')
+  } else {
+    const valid = sh(['--full', '--dir', '/opt/catwaf', '--domain', 'example.com', '--admin-user', 'admin'])
+    check('a valid argument set passes validation', /must run as root/.test(valid.out), valid.out.slice(0, 120))
+  }
 }
 
 section('no credentials or tokens in query strings')

@@ -157,8 +157,21 @@ router.post('/api/cloudflare/lock-origin', writeRequired, async (req, res) => {
     if (content.includes('@@CATWAF_CF_LOCK_START@@')) {
       content = content.replace(/# @@CATWAF_CF_LOCK_START@@[\s\S]*?# @@CATWAF_CF_LOCK_END@@/, block)
     } else {
-      const idx = content.indexOf('\n}', content.indexOf(':8081'))
-      content = content.slice(0, idx) + '\n' + block + content.slice(idx)
+      // Anchor on the last site block's closing brace, the same way
+      // services/caddy.js places the WAF block — so the origin lock always
+      // lands in the site CatWAF is protecting. The old code searched for the
+      // literal string ':8081', which was only ever the starter Caddyfile's
+      // own port: any other port made indexOf() return -1 (and a negative
+      // fromIndex is clamped to 0, silently anchoring at the top of the
+      // file), and now that :8081 is the admin dashboard it would have
+      // matched the control panel's block instead of the protected site's.
+      const idx = caddySvc.lastSiteBlockClose(content)
+      if (idx === -1) {
+        return res.status(400).json({
+          detail: 'This Caddyfile has no site block to lock — add the block for the site you are protecting first.',
+        })
+      }
+      content = content.slice(0, idx) + block + '\n' + content.slice(idx)
     }
     fs.writeFileSync(caddySvc.CADDYFILE_PATH, content, 'utf8')
 

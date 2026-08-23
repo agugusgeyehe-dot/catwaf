@@ -8,6 +8,12 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'catwaf-attack-'))
 process.env.JWT_SECRET = 'z'.repeat(64)
 process.env.DB_DIR = DATA_DIR
 process.env.CADDYFILE_PATH = path.join(DATA_DIR, 'Caddyfile')
+
+// Never let a config reload reach a Caddy running on this machine.
+// `reloadCaddy()` POSTs to CADDY_ADMIN_URL, which defaults to Caddy's real
+// admin port — running the suite on a host where CatWAF is live would replace
+// that Caddy's configuration with this file's fixture and take the site down.
+process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
 fs.writeFileSync(process.env.CADDYFILE_PATH, ':80 {\n  respond "test"\n}\n')
 
 const ROOT = path.join(__dirname, '..')
@@ -468,6 +474,45 @@ const server = app.listen(0, '127.0.0.1', async () => {
       let refused = false
       try { await netGuard.guardedFetch(proto) } catch { refused = true }
       check(`guardedFetch refuses ${proto.split(':')[0]}:`, refused)
+    }
+
+    // guardedFetch once accepted no `body` at all, so every POST through it —
+    // captcha verification, telemetry, threat-network submission — silently
+    // sent an empty request. A challenge nobody can pass locks users out of a
+    // protected site, so the body reaching fetch is a security property.
+    {
+      const realFetch = global.fetch
+      const sent = []
+      let redirect = null
+      global.fetch = async (url, opts) => {
+        sent.push({ method: opts.method, body: opts.body ?? null, headers: opts.headers || {} })
+        if (redirect && sent.length === 1) return { status: redirect, headers: new Map([['location', '/final']]) }
+        return { status: 200, ok: true, headers: new Map() }
+      }
+      try {
+        await netGuard.guardedFetch('http://1.1.1.1/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'secret=s&response=t',
+        })
+        check('guardedFetch transmits the POST body', sent[0]?.body === 'secret=s&response=t', sent[0])
+
+        sent.length = 0; redirect = 307
+        await netGuard.guardedFetch('http://1.1.1.1/r', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"a":1}',
+        })
+        check('a 307 redirect preserves method and body',
+          sent[1]?.method === 'POST' && sent[1]?.body === '{"a":1}', sent[1])
+
+        sent.length = 0; redirect = 302
+        await netGuard.guardedFetch('http://1.1.1.1/r', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"secret":"x"}',
+        })
+        check('a 302 redirect does not replay a secret-bearing body',
+          sent[1]?.method === 'GET' && sent[1]?.body === null && !('Content-Type' in sent[1].headers), sent[1])
+      } finally {
+        global.fetch = realFetch
+      }
     }
 
     for (const ip of ['127.0.0.1', '169.254.169.254', '10.0.0.5', '::1']) {

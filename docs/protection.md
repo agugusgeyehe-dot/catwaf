@@ -281,6 +281,89 @@ catwaf jobs run lists.refresh
 
 ---
 
+## Upload malware scanning
+
+Off by default, and the only feature that puts CatWAF in the data path.
+
+Everything else on this page decides from headers, so it can run as a
+`forward_auth` hop: Caddy asks CatWAF for a verdict and then proxies to your
+origin itself. Malware scanning needs the request *body*, which that hop never
+carries. So for the upload paths you nominate — and only those — Caddy proxies
+to CatWAF instead, and CatWAF forwards the request on to the same upstream once
+the body has been scanned. Every other request still goes straight to your
+origin, unchanged.
+
+That means the cost is confined to uploads, and so is the blast radius: if the
+feature is off, nothing is rendered into the Caddyfile at all.
+
+```
+catwaf settings upload_scan
+```
+
+**It needs a local clamd.** CatWAF never bundles an AV engine or a signature
+database, and never installs one behind your back. Without clamd the feature
+reports itself unavailable and traffic is unaffected:
+
+```
+GET /api/upload-scan/status
+```
+
+The installer can set it up for you, but only if asked:
+
+```
+sudo bash setup.sh --with-clamav
+```
+
+On an existing install, `apt install clamav clamav-daemon` (Debian/Ubuntu) or
+`dnf install clamav clamd clamav-update` (Fedora/RHEL), then run `freshclam`
+once — clamd will not start without a signature database.
+
+**Two decisions worth making deliberately:**
+
+`fail_open` (default on) is what happens when the scanner cannot be reached. On,
+an unscannable upload reaches your origin; off, it is refused with a 503. The
+default assumes a stopped clamd should not take your uploads down with it —
+invert it if an unscanned upload is the worse outcome for you.
+
+`max_scan_bytes` (default 25 MiB) is both the scan limit and the memory limit: a
+verdict has to be reached before any of the body is forwarded, so that much is
+buffered and no more. Anything larger is streamed past unscanned or refused,
+per `oversize_action`.
+
+To confirm the wiring end to end, send the EICAR test string through:
+
+```
+POST /api/upload-scan/test   {"content": "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"}
+```
+
+A correctly wired scanner answers with `Eicar-Test-Signature`, not `clean`.
+
+**Do not test this by uploading `eicar.com` through a form.** It will come back
+clean, and the feature is not broken. CatWAF hands clamd the request body as it
+arrives on the wire, so a `multipart/form-data` upload reaches the scanner
+wrapped in its MIME envelope — and ClamAV's EICAR signature is defined to match
+only a file that *is* EICAR, from its first byte. `clamdscan` reports the same
+"OK" for any file with bytes in front of the string; it is a property of that
+test signature, not of the scan path. Real signatures are not written that way,
+and ClamAV unpacks the archive and document formats malware actually arrives in.
+
+To exercise the block path end to end rather than the scanner alone, POST the
+EICAR string as the entire request body:
+
+```
+POST /upload  Content-Type: application/octet-stream
+X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*
+```
+
+→ `403` with `X-CatWAF-Verdict: upload-malware`, and a `Malware found in an
+upload` line in the CatWAF log. Note that CatWAF's own WAF rules run first: the
+default content-type allowlist and method allowlist (`catwaf settings access`,
+`catwaf settings upload_scan`) may refuse the request before the scanner ever
+sees it, which is Coraza doing its job and shows up as a bodyless `403` with no
+verdict header.
+
+---
+
 ## Why a feature might not be doing anything
 
 Three honest possibilities, in the order worth checking:

@@ -91,6 +91,31 @@ function dataDir() {
   return process.env.DB_DIR || path.join(PROJECT_ROOT, 'data')
 }
 
+// The installer creates `catwaf` as a no-home system account, so Caddy's
+// storage root — $XDG_DATA_HOME, else $HOME/.local/share — resolves under a
+// /home/catwaf that does not exist. Anything Caddy stores there then fails:
+// ACME certificates (re-requested on every restart, straight into the
+// provider's rate limits) and the internal CA that `tls internal` provisions,
+// which aborts config load outright with "generating root: saving root
+// certificate: mkdir /home/catwaf: permission denied".
+//
+// Resolved at module load, before anything shells out to the caddy binary, so
+// every child process inherits one storage root that the service account
+// actually owns. An explicit XDG_DATA_HOME is always respected.
+;(function ensureCaddyStorageRoot() {
+  if (process.env.XDG_DATA_HOME) return
+  const home = process.env.HOME
+  if (home) {
+    try { fs.accessSync(home, fs.constants.W_OK); return } catch {}
+  }
+  const root = path.join(dataDir(), 'caddy-home')
+  try {
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+    process.env.XDG_DATA_HOME = root
+    if (!process.env.XDG_CONFIG_HOME) process.env.XDG_CONFIG_HOME = root
+  } catch {}
+})()
+
 function auditLogCandidates() {
   if (AUDIT_LOG_EXPLICIT) return [process.env.CORAZA_AUDIT_LOG]
   return [DEFAULT_AUDIT_LOG, path.join(dataDir(), 'logs', 'coraza-audit.json')]
@@ -204,12 +229,18 @@ process.stdin.on('data', c => { body += c })
 process.stdin.on('end', async () => {
   const url = process.env.CW_ADMIN_URL + process.env.CW_ADMIN_PATH
   const method = process.env.CW_ADMIN_METHOD
-  const opts = { method, signal: AbortSignal.timeout(Number(process.env.CW_ADMIN_TIMEOUT)) }
+  // Caddy's admin endpoint checks the request origin on every method, not
+  // only writes. Sending it just for non-GET made GET /config/ come back
+  // 403 "client is not allowed to access from origin ''", which is what
+  // isCaddyRunning() probes with — so a perfectly healthy Caddy was reported
+  // as down.
+  const opts = {
+    method,
+    signal: AbortSignal.timeout(Number(process.env.CW_ADMIN_TIMEOUT)),
+    headers: { 'Origin': process.env.CW_ADMIN_URL },
+  }
   if (method !== 'GET') {
-    opts.headers = {
-      'Content-Type': process.env.CW_ADMIN_CTYPE,
-      'Origin': process.env.CW_ADMIN_URL,
-    }
+    opts.headers['Content-Type'] = process.env.CW_ADMIN_CTYPE
     opts.body = body
   }
   try {
@@ -688,7 +719,7 @@ function renderCaddyfile(content, waf) {
     if (insertAt === -1) {
       throw new Error(
         'This Caddyfile has no site block for CatWAF to protect. ' +
-        'Add a site block (for example `:8081 { reverse_proxy 127.0.0.1:3000 }`) pointing at the application you want to protect, then apply again.'
+        'Add a site block (for example `:80 { reverse_proxy 127.0.0.1:8082 }`) pointing at the application you want to protect, then apply again.'
       )
     }
     out = content.slice(0, insertAt) + '\n' + newBlock + '\n' + content.slice(insertAt)
@@ -777,10 +808,28 @@ function reloadCaddy() {
   return { reloaded: false, error: attempts.join(' | '), method: null }
 }
 
+// `pgrep` lives in procps, which a minimal Debian or Ubuntu install — and
+// every Docker base image — does not ship. Relying on it alone meant that on
+// exactly those hosts `catwaf health`, `doctor` and `status` all announced
+// "Caddy: not running" while Caddy was serving traffic. /proc is always
+// there on Linux; pgrep stays as the path for everything else.
+function caddyPidsFromProc() {
+  const pids = []
+  let entries = []
+  try { entries = fs.readdirSync('/proc') } catch { return pids }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    try {
+      if (fs.readFileSync(`/proc/${entry}/comm`, 'utf8').trim() === 'caddy') pids.push(Number(entry))
+    } catch {}
+  }
+  return pids
+}
+
 function isCaddyRunning() {
   try { adminApiRequest('GET', '/config/', '', 'application/json', 3000); return true } catch {}
   try { execFileSync('pgrep', ['-x', 'caddy'], { timeout: 3000 }); return true } catch {}
-  return false
+  return caddyPidsFromProc().length > 0
 }
 
 function getCaddyModules() {
@@ -794,7 +843,7 @@ function getCaddyPid() {
     const pid = parseInt(out.split('\n')[0], 10)
     if (Number.isFinite(pid)) return pid
   } catch {}
-  return null
+  return caddyPidsFromProc()[0] ?? null
 }
 
 // ─── Redaction ──────────────────────────────────────────────────────────

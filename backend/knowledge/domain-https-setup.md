@@ -33,7 +33,7 @@ Caddy requests certificates for both automatically the first time it starts with
 
 ## Running without a domain
 
-Leave the domain blank during setup to run locally at `http://localhost:3000` instead — the backend serves the dashboard and API itself on one port, no Caddy fronting needed, no certificate involved. You can always re-run `catwaf --setup` later once you have a domain ready.
+Leave the domain blank during setup to run locally at `http://localhost:8000` (whatever `PORT` is set to) instead — the backend serves the dashboard and API itself on one port, no Caddy fronting needed, no certificate involved. You can always re-run `catwaf --setup` later once you have a domain ready.
 
 ## Changing your domain later
 

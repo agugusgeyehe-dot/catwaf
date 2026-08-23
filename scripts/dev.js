@@ -85,7 +85,7 @@ ${wafBlock('    ', auditLogPath)}
 function main() {
   spawnSync(process.execPath, [path.join(PROJECT_ROOT, 'scripts', 'ensure-catai-runtime.js')], { stdio: 'inherit' })
 
-  const externalDashboardPort = Number(process.env.VITE_DEV_PORT_EXTERNAL || 3000)
+  const externalDashboardPort = Number(process.env.VITE_DEV_PORT_EXTERNAL || 8081)
   const externalApiPort = Number(process.env.PORT || 8000)
 
   const tasks = [

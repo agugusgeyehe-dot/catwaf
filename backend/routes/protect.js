@@ -136,6 +136,39 @@ router.get('/api/intel/dnsbl/:ip', authRequired, async (req, res) => {
   res.json({ ip: req.params.ip, dnsbl: await dnsbl.lookup(req.params.ip) })
 })
 
+// ─── Upload malware scanning ────────────────────────────────────────────
+//
+// ClamAV is an optional dependency CatWAF never installs, so "is it there"
+// is a question the dashboard and `catwaf doctor` both have to be able to
+// ask. Reported as an availability fact rather than an error: not having a
+// scanner installed is a normal state, not a fault.
+router.get('/api/upload-scan/status', authRequired, async (req, res) => {
+  const clamav = require('../services/clamav')
+  const cfg = settings.get('upload_scan')
+  const health = await clamav.available({ force: req.query.refresh === 'true', cfg })
+  res.json({
+    enabled: cfg.enabled,
+    scanner: health,
+    paths: cfg.paths,
+    methods: cfg.methods,
+    action: cfg.action,
+    fail_open: cfg.fail_open,
+    max_scan_bytes: cfg.max_scan_bytes,
+  })
+})
+
+// Scans an operator-supplied sample. The point is to prove the daemon is
+// wired up correctly — EICAR through this endpoint should come back FOUND.
+router.post('/api/upload-scan/test', authRequired, writeRequired, async (req, res) => {
+  const clamav = require('../services/clamav')
+  const { content } = req.body || {}
+  if (typeof content !== 'string') return bad(res, 'content must be a string')
+  if (content.length > 1024 * 1024) return bad(res, 'content must be 1 MiB or less')
+  auditSvc.audit(req, 'upload_scan.test', `${content.length} bytes`)
+  const cfg = settings.get('upload_scan')
+  res.json({ result: await clamav.scanBuffer(Buffer.from(content, 'utf8'), cfg, cfg.timeout_ms) })
+})
+
 router.post('/api/intel/probe', authRequired, writeRequired, async (req, res) => {
   const { ip } = req.body || {}
   if (!isValidIpOrCidr(String(ip || '').trim())) return bad(res, 'ip must be a valid IP address')

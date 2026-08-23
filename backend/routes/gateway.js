@@ -4,6 +4,7 @@
 //
 //   /api/enforce        Caddy's forward_auth hop into the classification
 //                       pipeline (ideas #1-#13).
+//   /api/upload-gate    the inline malware scan for upload paths.
 //   /catwaf-challenge   the interstitial a challenged visitor is sent to.
 //   /metrics            the Prometheus scrape endpoint (idea #46).
 //
@@ -11,6 +12,8 @@
 // carries its own authentication:
 //   * /api/enforce requires a shared key derived from the instance secret and
 //     rendered into the Caddyfile, so only this install's own Caddy can call it.
+//   * /api/upload-gate requires its own derived key, distinct from the
+//     enforcement one so the two cannot be used interchangeably.
 //   * /metrics requires a bearer token and a source-CIDR allowlist.
 //   * /catwaf-challenge is deliberately public — it is served to unverified
 //     visitors — and holds no state beyond a short-lived signed token.
@@ -107,6 +110,188 @@ router.all('/api/enforce', async (req, res) => {
 
   res.set('X-CatWAF-Verdict', verdict.greylisted ? 'greylist' : 'allow')
   return res.status(200).json({ action: 'allow', cached: verdict.cached })
+})
+
+// ─── /api/upload-gate ───────────────────────────────────────────────────
+//
+// Malware scanning needs the request *body*, and forward_auth only ever
+// forwards headers. So for the upload paths the operator nominates — and
+// only those — Caddy proxies the request to CatWAF instead of to the origin,
+// and CatWAF forwards it onward once the body has been scanned. CatWAF is
+// therefore in the data path for uploads alone; everything else keeps going
+// straight to the origin as before.
+//
+// The upstream to forward to arrives in a header set by Caddy, which makes it
+// attacker-controlled input the moment anyone can reach this port directly.
+// Two independent checks contain that: the shared key below, and an allowlist
+// check that the named upstream is one this Caddyfile actually proxies to —
+// so even with the key, this cannot be turned into a general-purpose proxy.
+
+const HOP_BY_HOP = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailer', 'transfer-encoding', 'upgrade',
+])
+
+function uploadUpstreamAllowed(target) {
+  const caddySvc = require('../services/caddy')
+  let known = []
+  try { known = caddySvc.currentSiteContext().upstreams || [] } catch { known = [] }
+  return known.some(u => String(u).replace(/^[a-z0-9]+:\/\//, '') === target)
+}
+
+// Only the headers the visitor sent travel onward; CatWAF's own control
+// headers are stripped so the origin never sees them.
+function forwardableHeaders(req, upstream) {
+  const out = {}
+  for (const [name, value] of Object.entries(req.headers || {})) {
+    const lower = name.toLowerCase()
+    if (HOP_BY_HOP.has(lower)) continue
+    if (lower.startsWith('x-catwaf-')) continue
+    if (lower === 'content-length' || lower === 'host') continue
+    out[name] = value
+  }
+  out.host = upstream
+  return out
+}
+
+// Buffers at most `cap` bytes. If the body is larger, buffering stops there
+// and the socket is left paused with the remainder unread, so an upload of
+// any size costs a bounded amount of memory — the scanner's size limit is
+// also the memory limit.
+function readBounded(req, cap) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let total = 0
+    const onData = chunk => {
+      total += chunk.length
+      if (total > cap) {
+        req.off('data', onData)
+        req.pause()
+        chunks.push(chunk)
+        return resolve({ buffer: Buffer.concat(chunks), truncated: true })
+      }
+      chunks.push(chunk)
+    }
+    req.on('data', onData)
+    req.once('end', () => resolve({ buffer: Buffer.concat(chunks), truncated: false }))
+    req.once('error', reject)
+  })
+}
+
+router.all('/api/upload-gate', async (req, res) => {
+  if (!timingSafeEquals(req.headers['x-catwaf-upload-key'], secrets.derive('upload-gate-key'))) {
+    return res.status(404).json({ detail: 'Not found' })
+  }
+
+  const cfg = settings.get('upload_scan')
+  const clamav = require('../services/clamav')
+
+  const upstream = String(req.headers['x-catwaf-upload-upstream'] || '').trim().slice(0, 256)
+  const originalUri = String(req.headers['x-catwaf-upload-path'] || '/').slice(0, 2048)
+  const ip = forwardedIp(req)
+
+  if (!upstream || !uploadUpstreamAllowed(upstream)) {
+    log.error('Upload gate called with an upstream this instance does not proxy to', { upstream, ip })
+    return res.status(502).json({ detail: 'Bad gateway' })
+  }
+
+  let body
+  let truncated
+  try {
+    ({ buffer: body, truncated } = await readBounded(req, cfg.max_scan_bytes))
+  } catch (e) {
+    log.error('Reading an upload failed', { error: e.message, ip })
+    return res.status(400).json({ detail: 'Could not read the request body' })
+  }
+
+  let verdict = { clean: true, virus: null, error: null }
+  let scanned = false
+
+  if (!cfg.enabled) {
+    // Nothing to scan, but the request still has to reach the origin.
+  } else if (truncated) {
+    // Too large to scan within the configured bound.
+    if (cfg.oversize_action === 'block') {
+      log.warn('Refusing an upload too large to scan', { limit: cfg.max_scan_bytes, ip })
+      return res.status(413).json({ detail: 'Upload too large to scan' })
+    }
+    log.warn('Forwarding an upload that was too large to scan', { limit: cfg.max_scan_bytes, ip })
+  } else {
+    verdict = await clamav.scanBuffer(body, cfg, cfg.timeout_ms)
+    scanned = true
+  }
+
+  if (scanned && verdict.clean === false) {
+    log.warn('Malware found in an upload', { virus: verdict.virus, ip, uri: originalUri })
+    if (cfg.ban_seconds > 0) {
+      try {
+        bans.ban({
+          target: ip,
+          source: 'upload_malware',
+          reason: `Uploaded a file containing ${verdict.virus}`,
+          seconds: cfg.ban_seconds,
+        })
+      } catch (e) { log.error('Could not ban an uploader', { error: e.message }) }
+    }
+    if (cfg.action === 'block') {
+      res.set('X-CatWAF-Verdict', 'upload-malware')
+      return res.status(403).json({ detail: 'Forbidden', reason: `Upload rejected: ${verdict.virus}` })
+    }
+  }
+
+  // A scan that could not complete is not a verdict. Which way that falls is
+  // the operator's call, because "uploads stop working when clamd is down"
+  // and "unscanned uploads reach the origin" are both real risks.
+  if (scanned && verdict.clean === null) {
+    log.error('Upload could not be scanned', { error: verdict.error, ip, failOpen: cfg.fail_open })
+    if (!cfg.fail_open) {
+      res.set('X-CatWAF-Verdict', 'upload-scan-failed')
+      return res.status(503).json({ detail: 'Upload scanning is unavailable' })
+    }
+  }
+
+  // Allowed through — forward to the origin and stream the response back.
+  // A truncated body means the rest is still unread on the socket, so the
+  // original framing headers are preserved and the remainder is piped.
+  const http = require('http')
+  const [host, port] = upstream.includes(':') ? upstream.split(':') : [upstream, '80']
+  const headers = forwardableHeaders(req, upstream)
+  if (truncated) {
+    if (req.headers['content-length']) headers['content-length'] = req.headers['content-length']
+    if (req.headers['transfer-encoding']) headers['transfer-encoding'] = req.headers['transfer-encoding']
+  } else {
+    headers['content-length'] = String(body.length)
+  }
+
+  const proxied = http.request({
+    host,
+    port: Number(port) || 80,
+    method: req.method,
+    path: originalUri,
+    headers,
+    timeout: 120_000,
+  }, origin => {
+    res.status(origin.statusCode || 502)
+    for (const [name, value] of Object.entries(origin.headers || {})) {
+      if (!HOP_BY_HOP.has(name.toLowerCase())) res.set(name, value)
+    }
+    if (scanned) res.set('X-CatWAF-Verdict', 'upload-clean')
+    origin.pipe(res)
+  })
+
+  proxied.on('timeout', () => proxied.destroy(new Error('origin timed out')))
+  proxied.on('error', e => {
+    log.error('Could not forward a scanned upload to the origin', { error: e.message, upstream })
+    if (!res.headersSent) res.status(502).json({ detail: 'Bad gateway' })
+  })
+
+  if (truncated) {
+    proxied.write(body)
+    req.resume()
+    req.pipe(proxied)
+  } else {
+    proxied.end(body)
+  }
 })
 
 // ─── /catwaf-challenge ──────────────────────────────────────────────────

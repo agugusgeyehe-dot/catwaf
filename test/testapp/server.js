@@ -79,6 +79,6 @@ server.listen(PORT, HOST, () => {
     console.log('inside a container network (docker-compose does this).')
   } else {
     console.log('WARNING: bound to 0.0.0.0 — only do this inside an isolated')
-    console.log('container network with no published ports.')
+    console.log('container network whose host mapping, if any, is loopback-only.')
   }
 })

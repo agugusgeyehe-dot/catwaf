@@ -16,12 +16,46 @@ function loadUsers() {
   return (stored && stored.length) ? stored : DEFAULT_USERS
 }
 
-function needsBootstrap() { return _users.length === 0 }
-function saveUsers(users) { db.setState('users', users) }
+// The account list was read once at module load and never again, so it went
+// stale the moment another process touched it — and CatWAF is routinely more
+// than one process. `catwaf user add` while the API was running left the API
+// still answering "No account has been created yet"; `catwaf user passwd` and
+// `catwaf user remove` did not affect the running API at all, which matters
+// because those are the commands an operator reaches for to revoke access.
+//
+// Reads revalidate against SQLite at most once a second. That is one small
+// indexed read per second on the authenticated path — every request already
+// does a bcrypt compare or a JWT verify — and it bounds staleness to a second
+// across every process instead of leaving it unbounded.
+const USER_REVALIDATE_MS = 1000
+let _usersReadAt = 0
+
+function refreshUsers() {
+  const now = Date.now()
+  if (now - _usersReadAt < USER_REVALIDATE_MS) return
+  _usersReadAt = now
+  let fresh
+  try { fresh = loadUsers() } catch { return }
+  // A populated account store never legitimately becomes empty: removeUser()
+  // refuses to delete the last admin. So an empty read on a store that had
+  // accounts is a fault — a missing or unparseable `users` row, which
+  // db.getState() reports as null rather than throwing — and NOT a signal to
+  // believe there are no accounts. Believing it would be serious:
+  // needsBootstrap() would turn true and re-open POST /api/setup/account,
+  // which is unauthenticated and creates an admin. Keep what we had.
+  if (_users.length && !fresh.length) return
+  _users = fresh
+}
+
+function needsBootstrap() { refreshUsers(); return _users.length === 0 }
+function saveUsers(users) {
+  db.setState('users', users)
+  _usersReadAt = Date.now()
+}
 
 let _users = loadUsers()
 const USERS = new Proxy([], {
-  get(_, prop) { return Reflect.get(_users, prop, _users) },
+  get(_, prop) { refreshUsers(); return Reflect.get(_users, prop, _users) },
   set(_, prop, value) { return Reflect.set(_users, prop, value, _users) },
   has(_, prop) { return Reflect.has(_users, prop) },
   ownKeys() { return Reflect.ownKeys(_users) },
@@ -36,6 +70,7 @@ const VALID_ROLES = ['admin', 'viewer']
 const MIN_PASSWORD_LENGTH = 8
 
 function addUser({ username, password, role = 'viewer' }) {
+  refreshUsers()
   if (_users.find(u => u.username === username)) throw new Error(`User "${username}" already exists`)
   if (!VALID_ROLES.includes(role)) throw new Error(`Role must be one of: ${VALID_ROLES.join(', ')}`)
   if (!password || password.length < MIN_PASSWORD_LENGTH) throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
@@ -45,6 +80,7 @@ function addUser({ username, password, role = 'viewer' }) {
   return user
 }
 function setPassword(username, password) {
+  refreshUsers()
   const u = _users.find(x => x.username === username)
   if (!u) throw new Error(`User "${username}" not found`)
   if (!password || password.length < MIN_PASSWORD_LENGTH) throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
@@ -66,14 +102,17 @@ function setPassword(username, password) {
 }
 
 function listUsers() {
+  refreshUsers()
   return _users.map(u => ({ id: u.id, username: u.username, role: u.role, created_at: u.created_at || null }))
 }
 
 function findUser(username) {
+  refreshUsers()
   return _users.find(u => u.username === username) || null
 }
 
 function removeUser(username) {
+  refreshUsers()
   const target = _users.find(u => u.username === username)
   if (!target) throw new Error(`User "${username}" not found`)
   if (target.role === 'admin' && _users.filter(u => u.role === 'admin').length === 1) {
@@ -85,6 +124,7 @@ function removeUser(username) {
 }
 
 function setRole(username, role) {
+  refreshUsers()
   if (!VALID_ROLES.includes(role)) throw new Error(`Role must be one of: ${VALID_ROLES.join(', ')}`)
   const u = _users.find(x => x.username === username)
   if (!u) throw new Error(`User "${username}" not found`)
@@ -97,6 +137,7 @@ function setRole(username, role) {
 }
 
 function verifyPassword(username, password) {
+  refreshUsers()
   const u = _users.find(x => x.username === username)
   if (!u || !u.password_hash) return false
   return bcrypt.compareSync(String(password || ''), u.password_hash)
@@ -115,6 +156,7 @@ function softAuth(req, res, next) {
         issuer: JWT_ISSUER,
         audience: JWT_AUDIENCE,
       })
+      refreshUsers()
       const live = _users.find(u => u.id === claims.id)
       // Inclusive: a JWT iat is whole seconds, so a token minted in the same
       // second as the reset carries iat === tokens_valid_after. Treating that

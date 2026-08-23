@@ -109,7 +109,7 @@ async function submit({ dryRun = false } = {}) {
 
   const url = new URL('/v1/signals', cfg.endpoint).toString()
   const { response } = await netGuard.guardedFetch(url, {
-    method: 'POST', timeoutMs: 15000, headers,
+    method: 'POST', timeoutMs: 15000, headers, body: JSON.stringify(payload),
   }).catch(e => { throw new Error(`Could not reach the threat network: ${e.message}`) })
 
   if (!response.ok) throw new Error(`Threat network returned ${response.status}`)

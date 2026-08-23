@@ -121,9 +121,15 @@ async function resolvePublicAddresses(hostname) {
 const MAX_REDIRECTS = 3
 const ALLOWED_PROTOCOLS = new Set(['https:', 'http:'])
 
-async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers = {} } = {}) {
+async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers = {}, body = null } = {}) {
   let url
   try { url = new URL(rawUrl) } catch { throw Object.assign(new Error('Invalid URL.'), { status: 400 }) }
+
+  // Redirects can change the method out from under us, so both travel
+  // through the hop loop together rather than being captured once.
+  let sendMethod = method
+  let sendBody = body
+  let sendHeaders = headers
 
   const visited = []
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -134,8 +140,9 @@ async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers 
     visited.push(url.toString())
 
     const res = await fetch(url.toString(), {
-      method,
-      headers,
+      method: sendMethod,
+      headers: sendHeaders,
+      ...(sendBody == null ? {} : { body: sendBody }),
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     })
@@ -146,6 +153,19 @@ async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers 
     }
     try { url = new URL(location, url) } catch {
       throw Object.assign(new Error('Redirect target is not a valid URL.'), { status: 400 })
+    }
+
+    // 307/308 preserve the method and body; 301/302/303 degrade to a bodyless
+    // GET, which is what browsers do and what keeps a secret-bearing POST body
+    // from being replayed to a redirect target.
+    if (res.status !== 307 && res.status !== 308) {
+      sendMethod = 'GET'
+      if (sendBody != null) {
+        sendBody = null
+        sendHeaders = Object.fromEntries(
+          Object.entries(sendHeaders).filter(([k]) => k.toLowerCase() !== 'content-type'),
+        )
+      }
     }
   }
   throw Object.assign(new Error(`Too many redirects (more than ${MAX_REDIRECTS}).`), { status: 400 })

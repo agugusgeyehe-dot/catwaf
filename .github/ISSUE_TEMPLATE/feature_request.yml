@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest something CatWAF should be able to do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        The best additions come from a wall someone actually hit, not from a
+        feature list. Describe the problem first — the solution you have in mind
+        is useful, but it is the second most useful thing here.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve
+      description: >-
+        What were you doing, and what stopped you? If you worked around it,
+        say how — the workaround is often the clearest description of the gap.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Optional. How you would expect CatWAF to handle it.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of CatWAF
+      options:
+        - WAF rules / paranoia / engine modes
+        - Protection layer (bans, challenge gate, threat intel)
+        - Settings, TLS or reverse proxy
+        - Dashboard
+        - CLI
+        - Installer / packaging / Docker
+        - CatAI
+        - Documentation
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I checked [ROADMAP.md](../blob/main/ROADMAP.md) — this is not already planned or explicitly ruled out.
+          required: true
+        - label: >-
+            I understand CatWAF cannot accept code contributions under its
+            current license, so this is a request rather than an offer to
+            implement it.
+          required: true

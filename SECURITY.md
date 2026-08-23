@@ -169,8 +169,17 @@ each release.
 
 ## Dependency posture
 
-`npm audit` reports advisories in two transitive dependencies. Both were assessed for
-reachability rather than upgraded blindly:
+Advisories with a non-breaking fix are taken. Two in 1.0.2:
+
+- **`js-yaml` quadratic CPU consumption in `!!omap` resolution** (GHSA-5p4m-2wfm-xmqj) —
+  upgraded to 4.3.1. It was not reachable with hostile input: the only `yaml.load()` call
+  is in `services/catai/retrieval.js`, parsing the frontmatter of the knowledge-base files
+  shipped inside the repository. Patched anyway, because the fix cost nothing.
+- **`nanoid`** (transitive, via the frontend build toolchain) — upgraded to 3.3.18.
+
+After those, `npm audit` reports advisories in two remaining transitive dependencies.
+Both were assessed for reachability rather than upgraded blindly, because in both cases
+the available "fix" is worse than the finding:
 
 - **`geoip-lite` → `rimraf`/`glob`/`minimatch`/`brace-expansion`, and `ip-address`.**
   These are reached only from `geoip-lite`'s `scripts/updatedb.js`, the database updater.
@@ -185,5 +194,5 @@ reachability rather than upgraded blindly:
   and the only remediation is a major upgrade to React Router 7, which is not appropriate
   in a patch release.
 
-Both are re-checked each release. If either becomes reachable, it will be fixed rather
-than re-documented.
+Both are re-checked each release, and were re-checked for 1.0.2. If either becomes
+reachable, it will be fixed rather than re-documented.

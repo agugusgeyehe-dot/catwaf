@@ -17,7 +17,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 900,
   },
   server: {
-    port: Number(process.env.VITE_DEV_PORT) || 3000,
+    port: Number(process.env.VITE_DEV_PORT) || 8081,
     strictPort: true,
     host: '127.0.0.1',
     ...(process.env.VITE_HMR_CLIENT_PORT

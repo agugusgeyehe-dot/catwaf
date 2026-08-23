@@ -112,6 +112,9 @@ function caddyUnitPresent() {
 }
 
 function caddyRunning() {
+  // Delegates to the same probe health and doctor use, so all three agree —
+  // and so this keeps working on hosts without procps (see caddy.js).
+  try { return require(path.join(PROJECT_ROOT, 'backend', 'services', 'caddy.js')).isCaddyRunning() } catch {}
   try { execFileSync('pgrep', ['-x', 'caddy'], { timeout: 3000, stdio: 'ignore' }); return true }
   catch { return false }
 }
@@ -161,8 +164,16 @@ function startWaf() {
   }
 
   const out = fs.openSync(path.join(dataDir(), 'caddy.log'), 'a')
+
+  // Requiring caddy.js settles Caddy's storage root for this process (the
+  // `catwaf` service account has no home directory — see the comment there),
+  // and the spawned Caddy inherits it.
+  try { require(path.join(PROJECT_ROOT, 'backend', 'services', 'caddy.js')) } catch {}
   const child = spawn(bin, ['run', '--config', config, '--adapter', 'caddyfile'], {
-    cwd: PROJECT_ROOT, detached: true, stdio: ['ignore', out, out], env: process.env,
+    cwd: PROJECT_ROOT,
+    detached: true,
+    stdio: ['ignore', out, out],
+    env: process.env,
   })
   child.unref()
   try { fs.closeSync(out) } catch {}

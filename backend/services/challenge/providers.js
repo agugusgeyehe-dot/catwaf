@@ -89,6 +89,7 @@ async function verify(name, token, cfg, remoteIp) {
       method: 'POST',
       timeoutMs: 8000,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
     })
     const data = await response.json().catch(() => null)
     if (!data) return { ok: false, error: 'The provider returned an unreadable response.' }

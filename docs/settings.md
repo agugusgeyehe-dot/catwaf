@@ -54,6 +54,7 @@ out.
 | [`greylist`](#greylist) | Skip rate limiting and challenges for a known client, but keep the WAF watching it. |
 | [`community_lists`](#community_lists) | Subscribe to maintained external lists and refresh them on a schedule. |
 | [`dnsbl`](#dnsbl) | Check the client address against public abuse-source zones. |
+| [`upload_scan`](#upload_scan) | Scan uploaded files with a local ClamAV daemon and refuse infected ones. |
 | [`threat_network`](#threat_network) | Opt in to exchanging anonymised attacker signals with other CatWAF instances. |
 | [`threat_feed`](#threat_feed) | Consult a host-local behavioural daemon (CrowdSec-style bouncer API). |
 | [`jobs`](#jobs) | The internal scheduler every time-based feature registers into. |
@@ -587,6 +588,27 @@ Check the client address against public abuse-source zones.
 | `timeout_ms` | number (100–10000) | `1200` | Lookup timeout (ms) |
 | `global_only` | switch | `true` | Only look up publicly routable addresses |
 
+## upload_scan
+
+**Upload malware scanning**
+
+Scan uploaded files with a local ClamAV daemon and refuse infected ones.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | switch | `false` | Requires a local clamd daemon. CatWAF does not install or bundle one; if it is missing, this feature reports itself unavailable. |
+| `paths` | list | `/upload*` | Only these paths are routed through the scanner, so ordinary traffic is unaffected. |
+| `methods` | list | `POST, PUT, PATCH` | Methods to scan |
+| `max_scan_bytes` | number (1024–1073741824) | `26214400` | Bodies above this are handled by the oversize action rather than scanned, since buffering is bounded. |
+| `oversize_action` | choice: `pass`, `block` | `pass` | Action for bodies too large to scan |
+| `action` | choice: `block`, `flag` | `block` | Action when malware is found |
+| `fail_open` | switch | `true` | On by default: a stopped clamd should not take uploads down. Turn off to refuse uploads that could not be scanned. |
+| `timeout_ms` | number (500–120000) | `10000` | Scan timeout (ms) |
+| `socket_path` | str | _(unset)_ | clamd socket path (blank = autodetect) |
+| `host` | str | _(unset)_ | clamd TCP host (blank = use the socket) |
+| `port` | number (1–65535) | `3310` | clamd TCP port |
+| `ban_seconds` | number (0–2592000) | `0` | Ban the uploader for (seconds, 0 = do not ban) |
+
 ## threat_network
 
 **Shared threat network** · contains secrets
@@ -761,4 +783,4 @@ Engine choice and pool tuning. SQLite is the right answer at Free's scale.
 
 ---
 
-39 groups, 291 settings.
+40 groups, 303 settings.

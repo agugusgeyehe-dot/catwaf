@@ -808,7 +808,17 @@ function explainBlockers(result) {
   return lines
 }
 
-async function runProtect(flags, { quietHeader = false } = {}) {
+// Does the Caddyfile already carry a CatWAF-managed WAF block? If so there is
+// a real configuration to serve, whatever discovery did or did not find.
+function caddyfileHasManagedWafBlock() {
+  try {
+    const caddySvc = require(path.join(BACKEND, 'services', 'caddy.js'))
+    const content = fs.readFileSync(caddySvc.CADDYFILE_PATH, 'utf8')
+    return content.includes(caddySvc.WAF_MARKER_START) && content.includes(caddySvc.WAF_MARKER_END)
+  } catch { return false }
+}
+
+async function runProtect(flags, { quietHeader = false, startConfiguredProxy = false } = {}) {
   const protectSvc = require(path.join(BACKEND, 'services', 'proxy', 'protect.js'))
   const state = require(path.join(BACKEND, 'services', 'state.js'))
   const db = require(path.join(BACKEND, 'services', 'db.js'))
@@ -826,6 +836,26 @@ async function runProtect(flags, { quietHeader = false } = {}) {
 
   // ── Environment ────────────────────────────────────────────────────
   if (!result.ok && result.stage === 'discovery') {
+    // Discovery is how `catwaf start` finds containers to protect. Failing it
+    // is not a reason to leave the WAF down: anyone who wrote their own site
+    // block by hand (docs/reverse-proxy.md — the documented path for an app
+    // that is not in Docker) already has a complete configuration, and
+    // README and `catwaf doctor` both tell them `catwaf start` brings the WAF
+    // up. It used to start the API, skip Caddy entirely and exit 1.
+    if (startConfiguredProxy && !dryRun && caddyfileHasManagedWafBlock()) {
+      const started = startProxy()
+      console.log('')
+      if (started.ok || started.alreadyRunning) {
+        step(true, 'WAF started from your existing configuration')
+        console.log(c('  No containers were discovered, so nothing was auto-configured —', C.dim))
+        console.log(c('  the site block already in your Caddyfile is being served.', C.dim))
+        console.log(c('  `catwaf health` confirms traffic is being inspected.\n', C.dim))
+        return 0
+      }
+      step(false, 'Could not start the WAF')
+      console.log(`\n${started.error}\n`)
+      return 1
+    }
     if (flags.json) { console.log(JSON.stringify({ ok: false, code: result.code, error: result.error }, null, 2)); return 1 }
     console.log('')
     step(false, 'Environment detected')
@@ -985,13 +1015,16 @@ function renderContainer(ctr) {
 }
 
 async function cmdAuto(flags) {
+  // `catwaf auto` is the discovery command — if it finds nothing, that is its
+  // answer, and it must not start anything as a side effect. Only
+  // `catwaf start` falls back to serving an existing configuration.
   return await runProtect(flags)
 }
 
 // `catwaf start` — the actual "put my website behind CatWAF" command.
 async function cmdStartProtect(flags) {
   if (flags['no-auto']) return 0
-  return await runProtect(flags)
+  return await runProtect(flags, { startConfiguredProxy: true })
 }
 
 // The settings, bans, template, report, job, backup, cache and two-factor

@@ -32,6 +32,7 @@ const SOURCES = {
   asn: 'Origin network is on the ASN blocklist',
   rdns: 'Reverse DNS matches a blocked suffix',
   tools_fingerprint: 'Matched a known scanner tool fingerprint (User-Agent + header shape)',
+  upload_malware: 'Uploaded a file the malware scanner rejected',
 }
 
 const now = () => new Date().toISOString()

@@ -14,7 +14,7 @@ The About page (and the About panel on Settings) reports real information read f
 
 It shows:
 
-- **Version** — the exact CatWAF release you're running. The current release is 1.0.1.
+- **Version** — the exact CatWAF release you're running. The current release is 1.0.2.
 - **Edition** — Lite or Full. See the editions topic for what each one installs. (This is separate from CatWAF Free, which is the product line this build belongs to.)
 - **Engine / Ruleset** — Coraza and OWASP CRS, the actual inspection stack.
 - **Runtime** — the Node.js version the backend is running under.

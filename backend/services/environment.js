@@ -328,7 +328,7 @@ function portOwner(port) {
   return null
 }
 
-async function detectPorts(ports = [80, 443, 2019, 3000, 8000, 8081]) {
+async function detectPorts(ports = [80, 443, 2019, 8000, 8081, 8082]) {
   const out = {}
   await Promise.all(ports.map(async p => {
     const inUse = await checkPort(p)

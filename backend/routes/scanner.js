@@ -44,7 +44,7 @@ router.post('/api/scanner/origin-exposure', writeRequired, async (req, res) => {
         detail: `Refusing to scan ${origin_ip}: ${why}. This check is for a publicly routable origin address.`,
       })
     }
-    const port = Number(origin_port ?? 8081)
+    const port = Number(origin_port ?? 8082)
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return res.status(400).json({ detail: 'origin_port must be a whole number between 1 and 65535.' })
     }

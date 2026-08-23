@@ -10,6 +10,9 @@ const { isValidCaddyPath } = require('../services/sanitize')
 
 router.get('/api/sensitive/state', (req, res) => res.json(sensitiveSvc.getSensitiveState()))
 
+// What each level is, measured from the wordlists rather than described.
+router.get('/api/sensitive/levels', (req, res) => res.json(sensitiveSvc.describeLevels()))
+
 router.get('/api/sensitive/blocked', (req, res) => res.json({ blocked: sensitiveSvc.getSensitiveState().blocked }))
 
 router.post('/api/sensitive/level', writeRequired, (req, res) => {

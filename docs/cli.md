@@ -35,8 +35,11 @@ whether a built dashboard is present.
 ```
 catwaf version
 ```
-Prints the version, e.g. `1.0.1`. Matches `package.json`, the `/api/health`
-response and the Docker image labels.
+Prints the version, e.g. `1.0.2`. Matches `package.json` and the Docker image
+labels. (The API's unauthenticated `/healthz` probe deliberately reports only
+`{"ok":true}` — no version — so an anonymous caller learns nothing about the
+build; `catwaf status` and `GET /api/diagnostics` report it to an authenticated
+caller.)
 
 ### `catwaf status`
 ```

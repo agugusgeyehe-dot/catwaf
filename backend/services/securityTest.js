@@ -136,7 +136,7 @@ async function collect() {
       'Set CORS_ORIGIN to your exact dashboard URL.')
   } else if (!cors) {
     fail(LOW, 'CORS_ORIGIN is not set',
-      'CatWAF defaults to http://localhost:3000, which is only correct for local development.',
+      'CatWAF defaults to http://localhost:8081, which is only correct for local development.',
       'Set CORS_ORIGIN to your real dashboard URL before exposing CatWAF.')
   } else {
     pass('CORS policy', cors)

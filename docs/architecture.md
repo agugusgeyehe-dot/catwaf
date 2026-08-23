@@ -17,6 +17,9 @@
                  |                   |
                  v                   v
         Coraza audit log      Your application
+                 |                  (the origin -- :8082
+                 |                   by convention; never
+                 |                   exposed directly)
                  |
                  v  (ingested every 5s)
               CatWAF backend  ---->  SQLite
@@ -50,7 +53,16 @@ either by invoking a local `caddy reload` (host installs) or by `POST /load`
 against Caddy's admin API (containers). `backend/services/caddy.js` contains
 no Docker calls, and `test/platform.test.js` asserts that.
 
-Caddy does the actual request inspection via the Coraza module — **CatWAF's backend never sits in the request path for your protected app.** If the control panel is down, your site keeps being protected.
+Caddy does the actual request inspection via the Coraza module — **in a default install, CatWAF's backend never sits in the request path for your protected app.** If the control panel is down, your site keeps being protected.
+
+Two opt-in features deliberately change that, and neither is on unless you turn it on:
+
+| Feature | What enters the path | If CatWAF is down |
+|---|---|---|
+| Runtime enforcement (client reputation) | A `forward_auth` hop carrying request **headers** | Fails open — every error path answers allow |
+| Upload malware scanning | The request **body**, for the nominated upload paths only | Governed by `upload_scan.fail_open`, on by default |
+
+Everything else keeps going straight from Caddy to your origin.
 
 What the backend does: serves the dashboard's API, persists WAF configuration, translates that configuration into real Coraza directives written into your Caddyfile, triggers a reload, and ingests Coraza's own audit log so the dashboard can show real traffic.
 

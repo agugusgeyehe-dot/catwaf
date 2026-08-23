@@ -9,6 +9,13 @@ const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'catwaf-platform-'))
 
 process.env.DB_DIR = path.join(WORK, 'db')
 process.env.JWT_SECRET = 'p'.repeat(64)
+// The provisioning section below calls prov.apply(), which reloads Caddy.
+// Left at the default admin endpoint that reload reached whatever Caddy owns
+// :2019 on this machine and replaced its live configuration with this file's
+// `catwaf.example.com` dashboard fixture — a running CatWAF stopped serving
+// the site it was protecting. Must be set before caddy.js is first required,
+// since it reads the endpoint at module load.
+process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
 fs.mkdirSync(process.env.DB_DIR, { recursive: true })
 
 let pass = 0, fail = 0
@@ -211,7 +218,21 @@ const auth = require(path.join(ROOT, 'backend/middleware/auth.js'))
   const compose = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8')
   check('docker-compose.yml does not mount the docker socket', !compose.includes('/var/run/docker.sock'))
   check('docker-compose.yml points the backend at the caddy admin API', compose.includes('CADDY_ADMIN_URL'))
-  check('test app publishes no ports', !/test-app:[\s\S]*?ports:/.test(compose.split('volumes:')[0]))
+  // The vulnerable demo app is the protected site's ORIGIN (:8082). It is
+  // published so the origin port is addressable for local inspection and so
+  // the WAF-vs-no-WAF difference can be demonstrated — but only on loopback,
+  // because a request that reaches it directly is never inspected by Coraza.
+  // Anything other than a 127.0.0.1 bind here is a WAF bypass on the network.
+  // (The old assertion here read `compose.split('volumes:')[0]`, which cut the
+  // string at the *backend* service's volumes key — before `test-app:` even
+  // appears — so it passed no matter what was published.)
+  const testAppBlock = compose.slice(compose.indexOf('\n  test-app:'))
+  const testAppPorts = [...testAppBlock.matchAll(/^\s*-\s*"([^"]+)"/gm)].map(m => m[1])
+  check('test app service block was located', testAppBlock.includes('TestApp.Dockerfile'))
+  check('test app is never published on a wildcard bind',
+    testAppPorts.every(p => p.startsWith('127.0.0.1:')), testAppPorts)
+  check('test app origin is published on :8082',
+    testAppPorts.some(p => /^127\.0\.0\.1:8082:/.test(p)), testAppPorts)
   const caddySource = fs.readFileSync(path.join(ROOT, 'backend/services/caddy.js'), 'utf8')
   check('caddy service never shells out to docker', !/\bdocker\b/.test(caddySource))
 

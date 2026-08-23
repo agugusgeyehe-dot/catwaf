@@ -1,12 +1,17 @@
 # docker-compose.yml — the full CatWAF stack: backend API, Caddy (dashboard
 # + WAF), and a local-only test app so the WAF demo has something to protect.
 #
+# Ports:
+#   :80 / :443  public traffic for the protected website, inspected by Coraza
+#   :8081       CatWAF admin dashboard (control panel UI + API)
+#   :8082       the protected website's own origin, loopback-only (see test-app)
+#
 # Quick start:
 #   cp .env.example .env      # then set JWT_SECRET at minimum
 #   docker compose up --build
-#   open http://localhost                                      (dashboard)
-#   curl "http://localhost:8081/"                              (allowed)
-#   curl "http://localhost:8081/?id=1+UNION+SELECT+1,2,3--"    (blocked)
+#   open http://localhost:8081                                 (dashboard)
+#   curl "http://localhost/"                                   (allowed)
+#   curl "http://localhost/?id=1+UNION+SELECT+1,2,3--"         (blocked)
 #
 # NO DOCKER SOCKET. The backend reloads Caddy over Caddy's own admin API
 # (see CADDY_ADMIN_URL below and backend/services/caddy.js). The admin API
@@ -27,7 +32,13 @@ services:
       CADDY_ADMIN_URL: http://caddy:2019
       CORAZA_AUDIT_LOG: /var/log/coraza/audit.json
     ports:
-      - "8000:8000"
+      # Loopback only. The dashboard reaches the API through Caddy on :80
+      # (`reverse_proxy backend:8000` over the compose network), so nothing
+      # needs this port from another machine — it is published for local
+      # inspection and healthchecks. The container binds 0.0.0.0 internally
+      # because a container's loopback is its own; this line, not the bind
+      # address, is what decides who can reach it.
+      - "127.0.0.1:8000:8000"
     volumes:
       - catwaf-data:/app/data
       - caddy-config:/etc/caddy
@@ -44,8 +55,17 @@ services:
     container_name: catwaf-caddy
     restart: unless-stopped
     ports:
-      - "80:80"     # dashboard
-      - "8081:8081" # protected test app
+      # Public traffic for the protected website. This is the WAF-inspected
+      # path — everything here goes through Coraza before it reaches the
+      # origin. :443 is published so that swapping the `:80` site block in
+      # docker/Caddyfile for a real domain gives you automatic HTTPS without
+      # having to edit this file too.
+      - "80:80"
+      - "443:443"
+      # CatWAF's own admin dashboard (control panel UI + its /api and /g
+      # routes, proxied to backend:8000). Separate from the protected site so
+      # the two can never collide on one port.
+      - "8081:8081"
     # Port 2019 (admin API) is intentionally NOT in `ports` — it stays on
     # the internal network, reachable by the backend service only.
     volumes:
@@ -56,16 +76,29 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  # Local-only intentionally-vulnerable test app used to demonstrate that the
-  # WAF actually blocks. It has NO `ports:` entry, so it is not reachable
-  # from the host or the internet — traffic reaches it only through
-  # Caddy + Coraza on :8081.
+  # The protected website's origin. Locally this is an intentionally
+  # vulnerable demo app used to show that the WAF actually blocks; in a real
+  # deployment you replace it with your own application (see docs/docker.md).
+  #
+  # It listens on 8080 INSIDE the container — that internal port is what
+  # Caddy dials over the compose network (`reverse_proxy test-app:8080` in
+  # docker/Caddyfile), and it does not change. The host mapping below is what
+  # makes the origin addressable as :8082 from this machine.
+  #
+  # 127.0.0.1 ONLY. :8082 is the un-inspected origin — a request sent there
+  # bypasses Coraza entirely, which is exactly what the Origin Exposure
+  # Scanner warns about. It is published so you can demonstrate the
+  # difference (:80 blocks, :8082 does not) and so `catwaf doctor` can see
+  # the origin, never so the internet can reach it. Do not widen this bind,
+  # and do not publish it at all if you swap in a real application.
   test-app:
     build:
       context: .
       dockerfile: docker/TestApp.Dockerfile
     container_name: catwaf-test-app
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8082:8080"
     security_opt:
       - no-new-privileges:true
 

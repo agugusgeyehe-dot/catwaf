@@ -11,6 +11,12 @@ process.env.DB_DIR = DATA_DIR
 // backend/server.js (and therefore services/caddy.js) is first required.
 process.env.CADDYFILE_PATH = path.join(DATA_DIR, 'Caddyfile')
 process.env.CORAZA_AUDIT_LOG = path.join(DATA_DIR, 'logs', 'audit.json')
+
+// Never let a config reload reach a Caddy running on this machine.
+// `reloadCaddy()` POSTs to CADDY_ADMIN_URL, which defaults to Caddy's real
+// admin port — running the suite on a host where CatWAF is live would replace
+// that Caddy's configuration with this file's fixture and take the site down.
+process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
 fs.writeFileSync(process.env.CADDYFILE_PATH, '{\n}\n\n:19992 {\n    respond "test" 200\n}\n')
 
 const crypto = require('crypto')

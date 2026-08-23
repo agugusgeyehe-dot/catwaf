@@ -39,18 +39,24 @@ check('dashboard URL is https', info.dashboardUrl === 'https://catwaf.example.co
 check('api URL is https', info.apiUrl === 'https://api.catwaf.example.com', info)
 check('dashboard and API are different hosts', info.dashboardHost !== info.apiHost)
 
+// Locally the backend serves the dashboard and the API on one origin — the
+// port it actually listens on. localhost:8081 is the Vite dev server and is
+// not something a local install binds.
 const local = localDomainInfo()
-check('local mode falls back to localhost:3000', local.dashboardUrl === 'http://localhost:3000', local)
+const localPort = process.env.PORT || 8000
+check('local mode uses the API port', local.dashboardUrl === `http://localhost:${localPort}`, local)
+check('local mode serves dashboard and API on one origin', local.dashboardUrl === local.apiUrl, local)
 check('local mode marks itself local', local.local === true)
 check('local mode API is on a different port', local.apiUrl === 'http://localhost:8000', local)
 
 console.log('\n== the generated Caddyfile is well formed ==')
+// Mirrors the domain branch of setup.js's writeCaddyfile. There is no local
+// branch here on purpose: without a domain, setup.js writes no control-panel
+// site block at all (the backend serves the dashboard and API on PORT
+// itself), so there is nothing for this helper to mirror.
 function siteBlocks(i, distPath = '/opt/catwaf/frontend/dist', port = 8000) {
-  return i.local
-    ? `http://localhost:3000 {\n    handle {\n        root * ${distPath}\n        try_files {path} /index.html\n        file_server\n    }\n}\n` +
-      `http://localhost:8000 {\n    reverse_proxy 127.0.0.1:${port}\n}\n`
-    : `${i.dashboardHost} {\n    handle {\n        root * ${distPath}\n        try_files {path} /index.html\n        file_server\n    }\n}\n` +
-      `${i.apiHost} {\n    reverse_proxy 127.0.0.1:${port}\n}\n`
+  return `${i.dashboardHost} {\n    handle {\n        root * ${distPath}\n        try_files {path} /index.html\n        file_server\n    }\n}\n` +
+    `${i.apiHost} {\n    reverse_proxy 127.0.0.1:${port}\n}\n`
 }
 const generated = siteBlocks(info)
 check('contains the dashboard site block', generated.includes('catwaf.example.com {'))

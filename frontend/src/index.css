@@ -637,6 +637,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .catai-send { padding: 8px 12px; }
 .catai-disclaimer { padding: 4px 14px; font-size: 10px; color: var(--cat-sub); opacity: 0.75; text-align: center; flex-shrink: 0; }
 
+/* The header and footer strip double as the panel's drag handle — its
+   "outline" — so the whole chat box can be repositioned, not just the
+   round toggle button. */
+.catai-panel-drag { cursor: grab; touch-action: none; }
+.catai-panel-drag:active { cursor: grabbing; }
+
 .catai-disabled-notice {
   display: flex; gap: 10px; padding: 12px; border-radius: 10px;
   background: color-mix(in srgb, var(--cat-accent) 8%, transparent); border: 1px solid var(--cat-border);

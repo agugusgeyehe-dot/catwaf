@@ -2,6 +2,13 @@
 
 CatWAF already does a lot — the goal from here isn't to add more features, it's to make the ones that exist solid enough that someone can trust them on a real site. Roughly in order:
 
+## Shipped in 1.0.2
+
+- [x] **The configuration and protection layer** — roughly 300 settings across 40 groups behind one declarative schema, and a client-reputation layer that decides about a *client* before the rule engine inspects the *request*. All of it opt-in.
+- [x] **Optional upload malware scanning** — a local ClamAV daemon, off by default, in the data path only for the upload paths you nominate.
+- [x] **Release hardening** — sign-out actually ends the session, the dashboard works from an address other than the one it was set up on, and a stopped CatWAF API no longer takes every protected site down with it.
+- [x] Fixed `guardedFetch` dropping the request body, which had silently emptied every outbound POST — including captcha verification, so an enabled challenge gate locked out legitimate visitors.
+
 ## Shipped in 1.0.1
 
 - [x] **CatWAF Lite and Full** — a real, persisted, enforced edition model. Lite installs no frontend dependencies at all and runs no HTTP server; Full adds the API, dashboard and Attack Map. `catwaf setup --full` converts in place without losing configuration or data.
@@ -19,6 +26,35 @@ CatWAF already does a lot — the goal from here isn't to add more features, it'
 - [x] Audited every documented endpoint and page against what actually ships; removed the claims that had drifted
 - [x] Operator tooling: `explain`, `simulate`, `replay`, `rules`, `audit`, `mode`, `paranoia`, `health`, `security-test`, `diff`, `config` snapshots
 - [x] Removed the Docker socket dependency entirely
+
+## BunkerWeb parity — where this actually stands
+
+Checked against BunkerWeb's feature list rather than guessed at. Most of the
+gap someone would expect from the comparison is already closed:
+
+- [x] **DNSBL** — `services/intel/dnsbl.js`, multi-zone, cached per address
+      *and* per zone, fails open on timeout.
+- [x] **Antibot** — cookie, JavaScript proof-of-work, CatWAF's own generated
+      captcha, plus reCAPTCHA / hCaptcha / Turnstile / mCaptcha.
+- [x] **Auto-ban on bad status codes** — `services/behavior.js`, counted off
+      the request log rather than on the request path, with escalation for
+      repeat offenders.
+- [x] **Upload malware scanning** — optional ClamAV module, off by default.
+      The one feature that puts CatWAF in the data path, and only for the
+      upload paths you nominate. See [docs/protection.md](docs/protection.md).
+
+Deliberately not copied:
+
+- **Per-site challenge selection.** CatWAF Free protects one site — an edition
+  boundary `sites.capacity()` enforces, not an oversight. Per-site config only
+  becomes meaningful if that boundary moves.
+- **A code-executing plugin ecosystem.** Plugins stay data-only. Reviewing and
+  being liable for arbitrary third-party code running inside a WAF is not a
+  reasonable position for a solo maintainer. Integrations that are actually
+  wanted (webhooks, chat notifications) belong in the backend, the same way
+  upload scanning does.
+- **Kubernetes / Helm / multi-DB.** Real engineering investments with no user
+  asking for them yet. Revisit when someone hits the wall, not before.
 
 ## Outstanding
 

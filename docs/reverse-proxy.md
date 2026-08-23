@@ -20,16 +20,16 @@ That second case means your Caddyfile needs at least one site block already defi
 ## Minimal starting Caddyfile
 
 ```caddyfile
-:8081 {
-    reverse_proxy localhost:3001
+:80 {
+    reverse_proxy localhost:8082
 }
 ```
 
-Replace `localhost:3001` with wherever your real application actually runs, and `:8081` with whatever port you want the *protected* version of your app reachable on. Save this as `/etc/caddy/Caddyfile` (or wherever `CADDYFILE_PATH` points — see `.env.example`), then hit any "Apply" action in the dashboard once. CatWAF will insert its block automatically, right before the closing brace, so you end up with something like:
+`:80` is where the public reaches the protected site — swap it for your real domain (`example.com { … }`) and Caddy provisions HTTPS on `:443` automatically. `localhost:8082` is the *origin*: wherever your application actually listens. `:8082` is the port used throughout CatWAF's docs, compose file and defaults for that role; use whatever your app really binds, but keep it off `:8081`, which is CatWAF's own dashboard. Once this is in place your application should no longer be reachable directly from outside — that is what the Origin Exposure Scanner (`/origin-scanner`) verifies. Save this as `/etc/caddy/Caddyfile` (or wherever `CADDYFILE_PATH` points — see `.env.example`), then hit any "Apply" action in the dashboard once. CatWAF will insert its block automatically, right before the closing brace, so you end up with something like:
 
 ```caddyfile
-:8081 {
-    reverse_proxy localhost:3001
+:80 {
+    reverse_proxy localhost:8082
 
     # @@CATWAF_WAF_START@@
     coraza_waf {

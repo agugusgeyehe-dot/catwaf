@@ -19,6 +19,12 @@ process.env.DB_DIR = DIR
 process.env.JWT_SECRET = 'a'.repeat(64)
 process.env.CADDYFILE_PATH = path.join(DIR, 'Caddyfile')
 process.env.CORAZA_AUDIT_LOG = path.join(DIR, 'logs', 'audit.json')
+
+// Never let a config reload reach a Caddy running on this machine.
+// `reloadCaddy()` POSTs to CADDY_ADMIN_URL, which defaults to Caddy's real
+// admin port — running the suite on a host where CatWAF is live would replace
+// that Caddy's configuration with this file's fixture and take the site down.
+process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
 fs.writeFileSync(process.env.CADDYFILE_PATH, '{\n}\n\nexample.com {\n    reverse_proxy 127.0.0.1:3000\n}\n')
 
 const R = path.join(__dirname, '..')
@@ -144,14 +150,24 @@ const server = app.listen(0, '127.0.0.1', async () => {
   check('a viewer can still discover', viewerDiscover.status === 200, viewerDiscover.status)
 
   section('concurrent runs are refused')
+  // The run lock is taken once discovery is under way. Without a Docker CLI
+  // discovery fails immediately, both requests return before either can hold
+  // the lock, and there is no concurrency left to observe — so this asserts
+  // nothing on a host without Docker rather than reporting a failure that is
+  // really "Docker is not installed here".
   const [first, second] = await Promise.all([
     admin.P('/api/apps/preview', {}),
     admin.P('/api/apps/preview', {}),
   ])
-  const statuses = [first.status, second.status].sort()
-  check('one run succeeds and the other is refused', statuses[0] === 200 && statuses[1] === 409, statuses)
-  const refused = first.status === 409 ? first : second
-  check('the refusal says what is already running', /already running/i.test(refused.json.detail || ''), refused.json)
+  const discoveryRan = !/docker cli not found/i.test(first.json?.error || '')
+  if (!discoveryRan) {
+    console.log('  SKIP  no Docker CLI on this host — discovery never reaches the run lock.')
+  } else {
+    const statuses = [first.status, second.status].sort()
+    check('one run succeeds and the other is refused', statuses[0] === 200 && statuses[1] === 409, statuses)
+    const refused = first.status === 409 ? first : second
+    check('the refusal says what is already running', /already running/i.test(refused.json.detail || ''), refused.json)
+  }
   const afterBusy = await admin.G('/api/apps')
   check('the busy flag clears again', afterBusy.json.busy === null, afterBusy.json.busy)
 

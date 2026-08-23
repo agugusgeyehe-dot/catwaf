@@ -87,6 +87,7 @@ async function send({ dryRun = false } = {}) {
     method: 'POST',
     timeoutMs: 10000,
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   })
   if (!response.ok) throw new Error(`Collector returned ${response.status}`)
   db.setState(LAST_SENT_KEY, new Date().toISOString())

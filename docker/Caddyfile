@@ -10,8 +10,12 @@
     order coraza_waf first
 }
 
-# ── Dashboard (control panel UI + API) ───────────────────────────────────
-:80 {
+# ── CatWAF admin dashboard (control panel UI + API) ──────────────────────
+# Deliberately on its own port, separate from the protected site on :80, so
+# the control panel and the traffic it is protecting can never collide.
+# Not WAF-inspected: this is CatWAF's own authenticated surface, not an
+# origin it is proxying for.
+:8081 {
     handle /api/* {
         reverse_proxy backend:8000
     }
@@ -25,9 +29,56 @@
     }
 }
 
-# ── Protected test app (this is what CatWAF's WAF actually inspects) ─────
-# Starts with no WAF directives. The first time you apply a WAF setting from
-# the dashboard or CLI, CatWAF inserts and manages its own block here.
-:8081 {
+# ── The protected website (this is what CatWAF's WAF actually inspects) ──
+# Public traffic arrives here on :80 (and :443 once you put a real domain in
+# place of `:80` below — Caddy provisions the certificate automatically, and
+# docker-compose.yml already publishes 443 for it).
+#
+# The upstream is the website's origin: the `test-app` service, which
+# listens on 8080 inside the container and is published on the host as
+# 127.0.0.1:8082. `test-app:8080` and host :8082 are the same process — the
+# service name is how one container reaches another on the compose network,
+# so this is the in-network address of the :8082 origin. Point it at your own
+# application to protect that instead (see docs/docker.md).
+#
+# The WAF block below is CatWAF's own generated block, shipped at CatWAF's
+# defaults (paranoia 1, detection 2, inbound anomaly threshold 5) so that
+# `docker compose up --build` protects the site immediately — the blocking
+# curls in README.md and docs/installation.md are meant to work on a stack
+# that has never been logged into.
+#
+# It stays under CatWAF's management: the markers are what services/caddy.js
+# looks for, so the first WAF change you apply from the dashboard or CLI
+# replaces everything between them. Do not hand-edit inside the markers.
+:80 {
     reverse_proxy test-app:8080
+
+# @@CATWAF_WAF_START@@
+# CatWAF WAF Rules — auto-generated, do not edit manually
+
+  coraza_waf {
+    load_owasp_crs
+    directives `
+      Include @coraza.conf-recommended
+      Include @crs-setup.conf.example
+      Include @owasp_crs/*.conf
+      SecRuleEngine On
+      SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=1"
+      SecAction "id:900001,phase:1,pass,t:none,nolog,setvar:tx.detection_paranoia_level=2"
+      SecAction "id:900110,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=5,setvar:tx.outbound_anomaly_score_threshold=4"
+      SecAction "id:900200,phase:1,pass,t:none,nolog,setvar:tx.allowed_methods=GET POST HEAD OPTIONS"
+      SecAction "id:900120,phase:1,pass,t:none,nolog,setvar:tx.early_blocking=1"
+      SecRequestBodyAccess On
+      SecResponseBodyAccess Off
+      SecRequestBodyLimit 13107200
+      SecRule REQUEST_HEADERS:User-Agent "@rx (?i)sqlmap|nikto|nmap|masscan|zgrab|dirbuster|gobuster|wfuzz|hydra|burpsuite" "id:9050,phase:1,deny,status:403,log,msg:'CatWAF Blocked Scanner UA'"
+      SecAuditEngine RelevantOnly
+      SecAuditLogParts ABCEFHZ
+      SecAuditLogType Serial
+      SecAuditLog /var/log/coraza/audit.json
+      SecAuditLogFormat JSON
+    `
+  }
+
+# @@CATWAF_WAF_END@@
 }

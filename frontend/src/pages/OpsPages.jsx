@@ -15,7 +15,7 @@ function useToast() {
 export function OriginScannerPage() {
   const [domain, setDomain] = useState('')
   const [ip, setIp] = useState('')
-  const [port, setPort] = useState(8081)
+  const [port, setPort] = useState(8082)
   const [authorized, setAuthorized] = useState(false)
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)

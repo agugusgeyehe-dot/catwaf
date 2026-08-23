@@ -10,7 +10,7 @@ Built on a native Go WAF engine. Not a ModSecurity wrapper.
 
 [![License: PolyForm Internal Use 1.0.0](https://img.shields.io/badge/license-PolyForm%20Internal%20Use%201.0.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-22%2B-brightgreen)](https://nodejs.org)
-[![Version](https://img.shields.io/badge/version-1.0.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.2-blue)](CHANGELOG.md)
 
 [Quick Start](#quick-start) • [Features](#whats-included) • [Docs](docs/) • [Contributing](CONTRIBUTING.md)
 
@@ -180,7 +180,7 @@ documented `0`/`1`/`2` for healthy/degraded/unhealthy.
 
 ```bash
 $ catwaf audit --last 1h          # find the event
-$ catwaf explain 733d797a8e02
+$ catwaf explain CuQuuFLaytNognWn
 ```
 
 `explain` shows the matched CRS rules and their descriptions, the paranoia
@@ -231,7 +231,7 @@ catwaf provision --apply         # install it, validate it, reload the server
 
 `--apply` backs up the existing file first, validates the result, and **rolls back automatically if validation fails** — a broken config never goes live.
 
-| Host | Behaviour | Verified for 1.0.1 |
+| Host | Behaviour | Verification status |
 |---|---|---|
 | Caddy | Automatic | Yes — config generation is covered by the WAF end-to-end suite, which runs real traffic through Caddy + Coraza. |
 | nginx | Automatic (writes a site file, enables it, reloads) | **No.** The code path exists and is unit-tested against sample configs, but no live nginx host was tested. |
@@ -248,11 +248,13 @@ Control panels regenerate their own vhosts, so a file written underneath them wo
 
 **Client reputation** — The rule engine asks *is this request malicious?*; this layer asks *should this client be here at all?* A challenge gate (cookie, JavaScript proof-of-work, a self-hosted captcha, or reCAPTCHA/hCaptcha/Turnstile/mCaptcha), behavioural banning, ASN and forward-confirmed reverse-DNS rules, DNSBLs and subscribed community blocklists. Every feature that stops an address writes to [one ban store](docs/protection.md#active-bans), so "why is this visitor blocked" has a single answer. All of it is off by default. See [the protection guide](docs/protection.md).
 
-**Configuration** — Around 290 settings across 38 groups — TLS and certificates, reverse-proxy behaviour, response headers, CORS, compression, caching, generated `robots.txt` and `security.txt` — reachable from the dashboard, `catwaf settings`, or the API, all through the same validation. Every change can be [previewed as a Caddyfile diff](docs/cli.md#catwaf-settings) before it applies, and is validated by Caddy and rolled back if it wouldn't load. See the [settings reference](docs/settings.md).
+**Configuration** — Around 300 settings across 40 groups — TLS and certificates, reverse-proxy behaviour, response headers, CORS, compression, caching, generated `robots.txt` and `security.txt` — reachable from the dashboard, `catwaf settings`, or the API, all through the same validation. Every change can be [previewed as a Caddyfile diff](docs/cli.md#catwaf-settings) before it applies, and is validated by Caddy and rolled back if it wouldn't load. See the [settings reference](docs/settings.md).
 
 **Operations** — One scheduler for every timed task, backups, configuration templates, CSV and printable reports, a [Prometheus endpoint](docs/metrics.md), and two-factor admin login. `catwaf doctor` reports what the installed Caddy build can actually do, and names anything you've switched on that couldn't be rendered because of a missing module — so an enabled feature is never a silent no-op.
 
 **Sensitive files** — Five graduated levels (SFL 0–4) that block access to config files, backups, and version-control directories, plus a scanner that walks your real webroot and shows what's publicly reachable.
+
+**Upload scanning** *(optional)* — Files posted to the upload paths you nominate can be scanned by a local ClamAV daemon before they reach your origin. Off by default, and the only feature that puts CatWAF in the data path — for those paths alone. CatWAF neither bundles nor installs an AV engine; without a local `clamd` the feature reports itself unavailable rather than failing requests. See [the protection guide](docs/protection.md#upload-malware-scanning).
 
 **Cloudflare** — A guided wizard to verify your zone, turn proxying on, enforce strict SSL, and lock your origin so traffic can't bypass Cloudflare.
 
@@ -281,28 +283,44 @@ Runs entirely on your machine via [Ollama](https://ollama.com) — nothing about
 Once CatWAF is in front of your app:
 
 ```bash
-curl "https://yoursite.com/?id=1+UNION+SELECT+1,2,3--"
-# → You have been blocked by CatWAF
+curl -o /dev/null -w '%{http_code}\n' "https://yoursite.com/?id=1+UNION+SELECT+1,2,3--"
+# → 403
 
-curl "https://yoursite.com/?q=<script>alert(1)</script>"
-# → You have been blocked by CatWAF
+curl -o /dev/null -w '%{http_code}\n' "https://yoursite.com/?q=<script>alert(1)</script>"
+# → 403
 
-curl -A "sqlmap/1.0" https://yoursite.com/
-# → You have been blocked by CatWAF
+curl -o /dev/null -w '%{http_code}\n' -A "sqlmap/1.0" https://yoursite.com/
+# → 403
 ```
+
+Coraza refuses the request itself, so a CRS block is a bare `403` with an empty
+body — deliberately, since an explanatory page tells an attacker what tripped.
+The block is recorded either way: `catwaf explain --last` says exactly which
+rules fired. (Requests stopped by the [sensitive-files
+layer](docs/protection.md) are the exception — those answer
+`You have been blocked by CatWAF`, unless a CRS rule recognised the path first
+and got there before them.) Set a friendlier page for either with
+`catwaf settings error_pages`.
 
 ### Run the whole demo locally
 
-CatWAF ships a deliberately vulnerable app used **only** to demonstrate that the WAF blocks. It binds to loopback, and in Docker it has no published ports — it is reachable only through Caddy + Coraza.
+CatWAF ships a deliberately vulnerable app used **only** to demonstrate that the WAF blocks. It binds to loopback: public traffic reaches it on `:80` through Caddy + Coraza, and its own origin port `127.0.0.1:8082` is published for local inspection only.
 
 ```bash
+cp .env.example .env      # then set JWT_SECRET — see the file for how
 docker compose up --build
 
-curl  "http://localhost:8081/"                            # 200 - reaches the app
-curl  "http://localhost:8081/?id=1+UNION+SELECT+1,2,3--"  # 403 - blocked by Coraza
-curl -A "sqlmap/1.0" "http://localhost:8081/"             # 403 - blocked by Coraza
+curl  "http://localhost/"                            # 200 - reaches the app
+curl  "http://localhost/?id=1+UNION+SELECT+1,2,3--"  # 403 - blocked by Coraza
+curl -A "sqlmap/1.0" "http://localhost/"             # 403 - blocked by Coraza
 
-open http://localhost                                     # the event appears in the dashboard
+# The same app on its origin port, with no WAF in front of it — this is what
+# an attacker who finds your origin gets, and what /origin-scanner checks for:
+curl  "http://127.0.0.1:8082/?id=1+UNION+SELECT+1,2,3--"  # 200 - not inspected
+
+# No accounts ship, here either. Create your login, then sign in:
+docker compose exec backend node bin/catwaf.js user add admin --role admin
+open http://localhost:8081                           # the event appears in the dashboard
 ```
 
 Or without Docker, as an automated test that asserts every step:
@@ -379,7 +397,12 @@ Read-only. Checks the OS, Node runtime, Caddy and the Coraza module, Caddyfile s
 
 CatWAF does not ship benchmark numbers, because it has not run a benchmark worth publishing.
 
-CatWAF is a **management and deployment layer around Coraza** — it writes Coraza directives, reloads Caddy, ingests Coraza's audit log, and gives you a UI and CLI for it. Request filtering itself is done by Coraza inside Caddy; CatWAF's backend is not in the request path at all.
+CatWAF is a **management and deployment layer around Coraza** — it writes Coraza directives, reloads Caddy, ingests Coraza's audit log, and gives you a UI and CLI for it. Request filtering itself is done by Coraza inside Caddy.
+
+In a default install CatWAF's backend is not in the request path at all. Two opt-in features change that, and both say so where you enable them:
+
+- **Runtime enforcement** (the client-reputation layer) adds a `forward_auth` hop from Caddy into CatWAF for the *headers* of each request. It fails open — every error path answers allow.
+- **Upload malware scanning** proxies the *body* of requests to the upload paths you nominate through CatWAF so they can be scanned. Only those paths; everything else still goes straight to the origin.
 
 That means:
 
@@ -400,16 +423,17 @@ On any other Linux distribution it stops with an explanation and manual instruct
 than guessing. macOS is supported for manual installation
 (`git clone && npm install && catwaf setup`) but not by the installer script.
 
-Not every one of those has been run end to end. This is what was actually exercised for
-1.0.1, so you can judge the risk yourself rather than take "supported" on trust:
+Not every one of those has been run end to end. The table below records what was actually
+exercised, and when. It is published so you can judge the risk yourself rather than take
+"supported" on trust:
 
-| Platform | Status for 1.0.1 |
+| Platform | Status |
 |---|---|
-| Debian 12 (bookworm) | **Verified** — clean-OS Lite install, idempotent re-run, Lite → Full upgrade, CLI, edition gating. Tested in a container, so systemd service installation and reboot persistence were *not* covered. |
-| AlmaLinux 9 | **Verified** — same matrix as Debian 12, same container caveat. |
+| Debian 12 (bookworm) | **Verified in 1.0.2** — clean-OS Full install from `setup.sh`, idempotent re-run, the full test suite, CLI, dashboard, signed API, WAF blocking in front of a real application, ClamAV upload scanning. Tested in a container, so systemd service installation and reboot persistence were *not* covered. |
+| Docker | **Verified in 1.0.2** — `docker compose up --build` from a clean checkout: dashboard, backend API, and the WAF blocking the documented attack requests against the bundled test app on first boot. |
+| AlmaLinux 9 | **Verified in 1.0.1** — clean-OS Lite install, idempotent re-run, Lite → Full upgrade, CLI, edition gating; same container caveat. Not re-run for 1.0.2. |
 | Ubuntu, Fedora, Rocky, Alpine | **Expected to work, not verified.** They share the apt/dnf/apk code paths that Debian and AlmaLinux exercised, but no run was performed. |
 | macOS | **Not verified.** Manual installation only; the installer script refuses to run. |
-| Docker | **Not verified for 1.0.1.** The compose stack ships but was not exercised in this release pass. |
 
 Two things nothing above covers, on any platform: the systemd units are installed only when
 an init system is present, and **reboot persistence has not been verified**. Both need a real

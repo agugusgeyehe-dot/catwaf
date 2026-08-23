@@ -11,6 +11,14 @@ const MARKER_END   = '# @@CATWAF_SENSITIVE_END@@'
 
 const WORDLIST_DIR = path.join(__dirname, '..', '..', 'frontend', 'public', 'wordlists')
 
+// How many paths from any one level's list actually reach the Caddyfile.
+// SFL1's list holds ~62k paths; a matcher with 62k entries is not something to
+// hand Caddy, so the list is truncated. That truncation is real and material —
+// "SFL1 is on" does not mean all 61,882 paths are blocked — so `describeLevels`
+// reports the cap alongside the totals rather than letting a client imply
+// otherwise.
+const PATHS_PER_LEVEL_CAP = 500
+
 function getSensitiveState() {
   return db.getState('sensitive') || { sfl_level: 0, blocked: [] }
 }
@@ -24,7 +32,7 @@ function loadWordlistFile(level) {
       .map(l => l.trim())
       .filter(l => l && !l.startsWith('#'))
       .map(l => l.startsWith('/') ? l : '/' + l)
-      .slice(0, 500)
+      .slice(0, PATHS_PER_LEVEL_CAP)
   } catch {
     return []
   }
@@ -132,8 +140,66 @@ function applyToCoraza(state, label, req) {
   return caddyResult
 }
 
+/**
+ * What each Sensitive File Level actually is, read from the wordlists on disk.
+ *
+ * Every field here is measured, not described: the name comes from the list's
+ * own header, the totals from counting its lines, and the sample from its
+ * first few entries. A client showing this is showing what the server would
+ * really block, which is the only version worth showing on a security console.
+ *
+ * `enforced_paths` is deliberately separate from `list_paths`. The first is
+ * what selecting this level really puts in the Caddyfile — cumulative over
+ * every lower level, and capped at PATHS_PER_LEVEL_CAP entries each. The
+ * second is the size of this level's own list. On SFL1 they are 500 and
+ * 61,882, and reporting only the larger would overstate what is enforced.
+ */
+function describeLevels() {
+  const levels = [{
+    level: 0,
+    name: 'Off',
+    list_paths: 0,
+    enforced_paths: 0,
+    truncated: false,
+    sample: [],
+  }]
+
+  for (let level = 1; level <= 4; level++) {
+    const file = path.join(WORDLIST_DIR, `sfl${level}.txt`)
+    let name = `Level ${level}`
+    let all = []
+    try {
+      const text = fs.readFileSync(file, 'utf8')
+      // "# CatWAF — Paranoia Level 2: Medium Sensitive" → "Medium Sensitive"
+      const header = text.split('\n', 1)[0] || ''
+      const match = header.match(/:\s*(.+?)\s*$/)
+      if (match) name = match[1]
+      all = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+    } catch {
+      // A missing list is reported as an empty level rather than an error: the
+      // firewall still runs, it just has nothing to add at this level.
+    }
+
+    const cumulative = cumulativeSflPaths(level)
+    levels.push({
+      level,
+      name,
+      // This level's own list…
+      list_paths: all.length,
+      // …versus what selecting it actually puts in the Caddyfile, which is
+      // cumulative over every level below it and capped per level.
+      enforced_paths: cumulative.length,
+      truncated: all.length > PATHS_PER_LEVEL_CAP,
+      sample: all.slice(0, 8).map(l => (l.startsWith('/') ? l : '/' + l)),
+    })
+  }
+
+  return { cap_per_level: PATHS_PER_LEVEL_CAP, levels }
+}
+
 module.exports = {
-  MARKER_START, MARKER_END, WORDLIST_DIR,
+  MARKER_START, MARKER_END, WORDLIST_DIR, PATHS_PER_LEVEL_CAP,
+  describeLevels,
   getSensitiveState, saveSensitiveState,
   buildSensitiveBlock, patchCaddyfile, applyToCoraza,
   cumulativeSflPaths,

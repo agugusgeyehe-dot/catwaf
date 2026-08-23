@@ -225,7 +225,7 @@ async function collect() {
 
   for (const [port, info] of Object.entries(env.ports)) {
     if (!info.inUse) continue
-    const known = { 80: 'HTTP', 443: 'HTTPS', 2019: 'Caddy admin API', 3000: 'dashboard dev server', 8000: 'CatWAF API', 8081: 'protected app' }[port]
+    const known = { 80: 'HTTP (protected site)', 443: 'HTTPS (protected site)', 2019: 'Caddy admin API', 8000: 'CatWAF API', 8081: 'CatWAF dashboard', 8082: 'protected site origin' }[port]
     const owner = info.owner ? ` — held by ${info.owner.command || 'unknown process'}${info.owner.pid ? ` (pid ${info.owner.pid})` : ''}` : ''
     r.add(INFO, `Port ${port} is in use${known ? ` (${known})` : ''}${owner}`)
   }

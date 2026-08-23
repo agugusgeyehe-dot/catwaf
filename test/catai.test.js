@@ -9,6 +9,16 @@ process.env.DB_DIR = DATA_DIR
 // Never let a reload reach a Caddy the developer is running locally:
 // `caddy reload` targets CADDY_ADMIN_URL, which defaults to :2019.
 process.env.CADDY_ADMIN_URL = 'http://127.0.0.1:19917'
+// Redirecting the reload was not enough. With CADDYFILE_PATH unset, caddy.js
+// detects the real one — so the CatAI action tests wrote their WAF block into
+// a live install's Caddyfile, pointing SecAuditLog at this temp directory.
+// The directory is removed when the test ends and Caddy then refuses to start
+// at all ("invalid WAF config from audit log"). Pin both paths here.
+process.env.CADDYFILE_PATH = path.join(DATA_DIR, 'Caddyfile')
+process.env.CORAZA_AUDIT_LOG = path.join(DATA_DIR, 'logs', 'coraza-audit.json')
+fs.mkdirSync(path.join(DATA_DIR, 'logs'), { recursive: true })
+fs.writeFileSync(process.env.CORAZA_AUDIT_LOG, '')
+fs.writeFileSync(process.env.CADDYFILE_PATH, '{\n}\n\nexample.com {\n    reverse_proxy 127.0.0.1:3000\n}\n')
 
 
 const ROOT = path.join(__dirname, '..')
@@ -315,7 +325,15 @@ section('concurrency gate')
 
   const sc = caddySvc.scoreCaddyfilePath
   check('a Caddyfile we already manage outranks any other', sc(managed) > sc(foreign) && sc(managed) > sc(readonlyF))
-  check('a writable candidate outranks a read-only one', sc(foreign) > sc(readonlyF))
+  // Root bypasses file permission bits, so a 0444 fixture is still writable to
+  // uid 0 and the two candidates score the same. That is the kernel behaving
+  // normally, not the ranking being wrong — and `npm test` under sudo is a
+  // realistic thing to do on a server, so say so instead of failing.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    console.log('  SKIP  running as root — a read-only fixture is still writable to uid 0.')
+  } else {
+    check('a writable candidate outranks a read-only one', sc(foreign) > sc(readonlyF))
+  }
   check('a non-existent path scores zero (never selected)', sc(path.join(tmpDir, 'nope')) === 0)
 
   const prevEnv = process.env.CADDYFILE_PATH

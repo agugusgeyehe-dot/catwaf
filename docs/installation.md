@@ -91,11 +91,18 @@ docker compose up --build
 
 | Service | URL |
 |---|---|
-| Control Panel | http://localhost |
+| Control Panel (admin) | http://localhost:8081 |
+| Protected website (through the WAF) | http://localhost — and https://localhost once you configure a domain |
 | Backend API | http://localhost:8000 |
-| Protected App (behind the WAF) | http://localhost:8081 |
+| Protected website's origin (bypasses the WAF) | http://127.0.0.1:8082 |
 
-This builds Caddy with the Coraza module for you (the manual `xcaddy` step below happens inside the image build instead), and ships a placeholder `demo-app` service so the "prove it's working" curl commands further down have something to protect immediately. See [docker.md](docker.md) for the full architecture, how to point it at your real application instead of the placeholder, and a security tradeoff in the compose file that's worth reading before you deploy this anywhere but your own machine.
+There are no accounts yet — create your login before opening the dashboard:
+
+```bash
+docker compose exec backend node bin/catwaf.js user add admin --role admin
+```
+
+This builds Caddy with the Coraza module for you (the manual `xcaddy` step below happens inside the image build instead), and ships a `test-app` service — the repository's deliberately vulnerable demo app, published on loopback only as the `:8082` origin — so the "prove it's working" curl commands further down have something to protect immediately. The WAF is active on `:80` from first boot at CatWAF's defaults, and `:8082` is the same app *without* the WAF in front of it, so you can see both sides. See [docker.md](docker.md) for the full architecture, how to point it at your real application instead of the demo, and a security tradeoff in the compose file that's worth reading before you deploy this anywhere but your own machine.
 
 The rest of this doc is the manual (non-Docker) path — useful if you want Caddy and Node running directly on the host, or you're adapting the setup for something docker-compose doesn't cover yet.
 
@@ -174,18 +181,23 @@ The wizard checks your environment, asks for a domain (leave it blank to run loc
 ## 4. Run it
 
 ```bash
-npm run dev     # development: backend :8000 + dashboard :3000
+npm run dev     # development: backend :8000 + dashboard :8081
 npm start       # production
 ```
 
-`npm run dev` starts the backend API and the frontend dev server, and also starts Caddy fronting `:3000`/`:8000` with a dev-only Coraza WAF block if a Caddy build with the Coraza module is available (`npm install` fetches one automatically) — see `scripts/dev.js`. The backend and Vite quietly move to internal ports in that case; you still use `:3000`/`:8000` as shown below. If no working Caddy is found, it says so and falls back to the backend and Vite talking directly with no WAF in the loop.
+`npm run dev` starts the backend API and the frontend dev server, and also starts Caddy fronting `:8081`/`:8000` with a dev-only Coraza WAF block if a Caddy build with the Coraza module is available (`npm install` fetches one automatically) — see `scripts/dev.js`. The backend and Vite quietly move to internal ports in that case; you still use `:8081`/`:8000` as shown below. If no working Caddy is found, it says so and falls back to the backend and Vite talking directly with no WAF in the loop.
 
 If CatAI is enabled, both commands first make sure Ollama is running and the model is downloaded and warm, so the assistant is ready the moment you open the dashboard. This adds a few seconds on the very first run (downloading the model) and under two seconds after that.
 
 | Service | URL |
 |---|---|
-| Control Panel | http://localhost:3000 |
+| Control Panel (admin) | http://localhost:8081 |
 | Backend API | http://localhost:8000 |
+
+Your protected site is separate from both of these: Caddy serves it on `:80`
+(and `:443` with a domain), proxying to wherever your application actually
+listens — `:8082` by convention throughout these docs. See
+[reverse-proxy.md](reverse-proxy.md).
 
 Log in with the admin account you created in step 3.
 
@@ -218,9 +230,9 @@ startup if it is readable by other users. See [SECURITY.md](../SECURITY.md#secre
 ## Verifying it's actually blocking things
 
 ```bash
-curl "http://localhost:8081/?id=1+UNION+SELECT+1,2,3--"
-curl "http://localhost:8081/?q=<script>alert(1)</script>"
-curl -A "sqlmap/1.0" http://localhost:8081/
+curl "http://localhost/?id=1+UNION+SELECT+1,2,3--"
+curl "http://localhost/?q=<script>alert(1)</script>"
+curl -A "sqlmap/1.0" http://localhost/
 ```
 
 All three should come back blocked. If they don't, start with **Setup Diagnostics** (`/diagnostics`) — the most common cause is the Caddyfile not actually having the `coraza_waf` directive wired in, which it checks for directly.

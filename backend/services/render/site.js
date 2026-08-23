@@ -121,6 +121,59 @@ function enforcementGate(ctx, out) {
   out.notes.push(`Live enforcement is active for: ${enforce.activeFeatures().join(', ')}.`)
 }
 
+// ─── Upload malware scanning ────────────────────────────────────────────
+//
+// Scanning needs the request body, and the forward_auth hop above only
+// carries headers. So for the nominated upload paths — and only those —
+// Caddy proxies to CatWAF, which scans the body and forwards it onward to
+// the same upstream the site would have used. Every other request still goes
+// straight to the origin, so the data-path cost is confined to uploads.
+function uploadScanGate(ctx, out) {
+  const cfg = ctx.get('upload_scan')
+  if (!cfg.enabled) return
+  if (!cfg.paths.length || !cfg.methods.length) return
+
+  if (!ctx.backend) {
+    out.skipped.push({ feature: 'upload_scan', reason: 'CatWAF\'s own API address is unknown, so uploads cannot be routed through the scanner.' })
+    return
+  }
+  // The scanner has to hand the request on to somewhere; with no upstream in
+  // the block there is nothing to forward to, and emitting the gate anyway
+  // would black-hole every upload.
+  if (!ctx.upstreams.length) {
+    out.skipped.push({ feature: 'upload_scan', reason: 'No reverse_proxy upstream was found in the protected site block, so scanned uploads would have nowhere to go.' })
+    return
+  }
+
+  const secrets = require('../secrets')
+  const upstream = String(ctx.upstreams[0]).replace(/^[a-z0-9]+:\/\//, '')
+
+  out.matchers.push(...block(m('uploadscan'), [
+    `path ${cfg.paths.map(q).join(' ')}`,
+    `method ${cfg.methods.map(p => String(p).toUpperCase()).join(' ')}`,
+  ]))
+
+  out.handles.push({
+    priority: 45,
+    lines: block(`handle ${m('uploadscan')}`, block(`reverse_proxy ${q(ctx.backend)}`, [
+      `header_up X-CatWAF-Upload-Key ${q(secrets.derive('upload-gate-key'))}`,
+      `header_up X-CatWAF-Upload-Upstream ${q(upstream)}`,
+      'header_up X-CatWAF-Upload-Path {http.request.uri}',
+      // The gate lives at a fixed path, so the original URI travels in the
+      // header above and is restored when the request is forwarded on.
+      `rewrite ${q('/api/upload-gate')}`,
+      // Uploads are large and the scan is synchronous, so this hop needs a
+      // longer read window than a normal proxied request.
+      ...block('transport http', [
+        'dial_timeout 10s',
+        'read_timeout 180s',
+        'write_timeout 180s',
+      ]),
+    ])),
+  })
+  out.notes.push(`Uploads to ${cfg.paths.join(', ')} are scanned for malware before reaching ${upstream}.`)
+}
+
 // ─── #40 robots.txt / #41 security.txt ──────────────────────────────────
 function wellKnownFiles(ctx, out) {
   const robots = wellknown.buildRobotsTxt()
@@ -689,6 +742,7 @@ function build(overrides = {}) {
   methodGuard(ctx, out)
   challengeRoutes(ctx, out)
   enforcementGate(ctx, out)
+  uploadScanGate(ctx, out)
   wellKnownFiles(ctx, out)
   cors(ctx, out)
   securityHeaders(ctx, out)

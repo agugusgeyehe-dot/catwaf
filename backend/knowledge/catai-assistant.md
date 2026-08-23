@@ -31,7 +31,7 @@ CatAI runs entirely on this machine via Ollama. Your questions, your settings, a
 
 ## Memory
 
-Each question is answered fresh — CatAI doesn't currently remember earlier messages in the conversation. If a follow-up needs context from what you asked before, just include it again in your next message.
+Each question is answered fresh — CatAI doesn't remember earlier messages in the conversation. If a follow-up needs context from what you asked before, just include it again in your next message.
 
 ## It can be wrong
 

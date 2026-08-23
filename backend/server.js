@@ -35,8 +35,8 @@ process.on('unhandledRejection', (reason) => {
 // and every call is same-origin (see isSameOrigin below).
 let CORS_ORIGIN = process.env.CORS_ORIGIN
 if (!CORS_ORIGIN) {
-  CORS_ORIGIN = 'http://localhost:3000'
-  console.warn('[CatWAF] CORS_ORIGIN is not set — allowing the Vite dev server (http://localhost:3000) in addition to this server\'s own origin.')
+  CORS_ORIGIN = 'http://localhost:8081'
+  console.warn('[CatWAF] CORS_ORIGIN is not set — allowing the Vite dev server (http://localhost:8081) in addition to this server\'s own origin.')
 }
 const allowedOrigins = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
 

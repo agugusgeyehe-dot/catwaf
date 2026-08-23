@@ -156,32 +156,38 @@ router.post('/api/catai/chat', chatLimiterPerDay, chatLimiterPerMin, async (req,
       },
     })
 
+    // Size only, never the prompt itself — it carries the operator's question
+    // and the live configuration context retrieved for it.
+    log.debug('CatAI prompt built', { user: req.user.username, chars: built.prompt.length })
+
     let full = ''
     await ollama.generateStream(built.prompt, (tok) => { full += tok; send({ t: 'token', v: tok }) })
 
     const CLAIMS_DONE_RE = /\b(?:i|i've|i have)\s+(?:now\s+|just\s+)?(block|unblock|disabl|enabl|set|chang|appl|add|remov|updat|turn|creat)(?:ed|d)?\b/i
 
+    let correction = null
+
     if (!actionOutcome && CLAIMS_DONE_RE.test(full)) {
-      send({ t: 'correction', v: "I can explain this, but I can't act on it from here — see the docs above for how to do it in the dashboard." })
+      correction = "I can explain this, but I can't act on it from here — see the docs above for how to do it in the dashboard."
     }
 
     if ((actionOutcome?.kind === 'offer' || actionOutcome?.kind === 'incomplete') && CLAIMS_DONE_RE.test(full)) {
-      send({
-        t: 'correction',
-        v: actionOutcome.kind === 'offer'
-          ? `To be clear: I haven't done that yet — nothing has changed. Use the confirm button above if you want me to go ahead.`
-          : `To be clear: I haven't done that yet — I still need the ${actionOutcome.missing} before I can.`,
-      })
+      correction = actionOutcome.kind === 'offer'
+        ? `To be clear: I haven't done that yet — nothing has changed. Use the confirm button above if you want me to go ahead.`
+        : `To be clear: I haven't done that yet — I still need the ${actionOutcome.missing} before I can.`
     }
 
     if (actionOutcome?.kind === 'applied'
         && /\b(i can(?:'|no)?t|i am (?:not )?un(?:able)|you(?:'ll| will) need to|you can do this|unable to)\b/i.test(full)) {
-      send({ t: 'correction', v: `Ignore that last part — I did make the change: ${actionOutcome.message} You can undo it with the button above.` })
+      correction = `Ignore that last part — I did make the change: ${actionOutcome.message} You can undo it with the button above.`
     }
+
+    if (correction) send({ t: 'correction', v: correction })
 
     if (actionOutcome && actionOutcome.kind !== 'error') {
       send({ t: 'action', v: actionOutcome })
     }
+
     send({ t: 'done', v: { sources: built.docIds } })
   } catch (e) {
     log.warn('CatAI chat error', { error: e.message, code: e.code })

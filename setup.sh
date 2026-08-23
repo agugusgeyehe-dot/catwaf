@@ -33,6 +33,7 @@ DOMAIN=""
 ADMIN_USER=""
 ASSUME_YES=0
 WITH_AI=""
+WITH_CLAMAV=""
 TMP_DIR=""
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -77,6 +78,9 @@ Options
   --admin-user <name> Admin account to create.
   --with-ai           Install Ollama for CatAI (Full only).
   --no-ai             Skip CatAI even in Full.
+  --with-clamav       Install ClamAV for upload malware scanning. Optional;
+                      the feature stays off until enabled in Settings.
+  --no-clamav         Skip ClamAV (the default).
   --yes               Never prompt. Fails instead of asking.
                       Suppresses prompts only; all validation still runs.
   -h, --help          Show this message.
@@ -121,6 +125,8 @@ parse_args() {
       --admin-user)   require_value "$1" "${2:-}"; ADMIN_USER="$2"; shift 2 ;;
       --with-ai) WITH_AI="yes"; shift ;;
       --no-ai)   WITH_AI="no"; shift ;;
+      --with-clamav) WITH_CLAMAV="yes"; shift ;;
+      --no-clamav)   WITH_CLAMAV="no"; shift ;;
       --yes|-y)  ASSUME_YES=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; die "Unknown option: $1" ;;
@@ -221,14 +227,22 @@ ensure_base_tools() {
   for tool in curl tar git; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
+
+  # pgrep comes from procps, whose package name is not "pgrep" — and which a
+  # minimal Debian/Ubuntu install (and every Docker base image) omits. Without
+  # it CatWAF's "is Caddy/nginx/Apache already running here" detection silently
+  # answers "nothing is running".
+  if ! command -v pgrep >/dev/null 2>&1; then
+    case "$PKG" in
+      dnf|yum) missing+=(procps-ng) ;;
+      *)       missing+=(procps) ;;
+    esac
+  fi
+
   if [ "${#missing[@]}" -gt 0 ]; then
     step "Installing base tools: ${missing[*]}"
     pkg_refresh
-    if [ "$PKG" = "apk" ]; then
-      pkg_install "${missing[@]}" ca-certificates
-    else
-      pkg_install "${missing[@]}" ca-certificates
-    fi
+    pkg_install "${missing[@]}" ca-certificates
     ok "Base tools installed"
   fi
 }
@@ -526,6 +540,53 @@ maybe_install_ai() {
   ok "Ollama installed"
 }
 
+# ── optional: ClamAV for upload scanning ─────────────────────────────────
+#
+# Off unless asked for. CatWAF never bundles an AV engine, and an install that
+# does not accept file uploads has no reason to carry a signature database —
+# so a missing clamd makes the feature report itself unavailable rather than
+# failing anything.
+maybe_install_clamav() {
+  [ "$WITH_CLAMAV" = "yes" ] || { info "Upload malware scanning skipped (optional — enable later with --with-clamav)"; return 0; }
+
+  step "Installing ClamAV for upload scanning"
+  if command -v clamd >/dev/null 2>&1 || command -v clamdscan >/dev/null 2>&1; then
+    ok "ClamAV already installed"
+  else
+    pkg_refresh
+    case "$PKG" in
+      apt) pkg_install clamav clamav-daemon || { warn "Could not install ClamAV — upload scanning will report itself unavailable."; return 0; } ;;
+      dnf) pkg_install clamav clamd clamav-update || { warn "Could not install ClamAV — upload scanning will report itself unavailable."; return 0; } ;;
+      apk) pkg_install clamav clamav-daemon || { warn "Could not install ClamAV — upload scanning will report itself unavailable."; return 0; } ;;
+    esac
+    ok "ClamAV installed"
+  fi
+
+  # Without a signature database clamd refuses to start, and freshclam is the
+  # only thing that puts one there. A failure is not fatal: the daemon can be
+  # updated and started by hand later.
+  step "Fetching ClamAV signatures (this can take a few minutes)"
+  if command -v freshclam >/dev/null 2>&1; then
+    freshclam >/dev/null 2>&1 || warn "freshclam did not complete — run it manually before enabling upload scanning."
+  fi
+
+  if has_systemd; then
+    local unit=""
+    for candidate in clamav-daemon clamd@scan clamd; do
+      if systemctl list-unit-files 2>/dev/null | grep -q "^${candidate}\."; then unit="$candidate"; break; fi
+    done
+    if [ -n "$unit" ]; then
+      systemctl enable --now "$unit" >/dev/null 2>&1 \
+        && ok "clamd running ($unit)" \
+        || warn "Could not start $unit — start it manually, then enable upload scanning in Settings."
+    else
+      warn "No clamd service unit found — start the daemon manually before enabling upload scanning."
+    fi
+  fi
+
+  info "Enable it in Settings → Upload malware scanning (off by default)."
+}
+
 # ── CatWAF's own setup wizard ────────────────────────────────────────────
 run_catwaf_setup() {
   step "Running CatWAF setup"
@@ -537,12 +598,32 @@ run_catwaf_setup() {
 
   # Argument array, no shell interpretation, run as the service account so
   # every file it creates is owned correctly from the start.
-  if ! sudo -u "$SERVICE_USER" -H \
+  #
+  # This script already runs as root, so `sudo` buys nothing — and a minimal
+  # Debian/Ubuntu install (and every Docker base image) does not ship it, which
+  # made this final step fail with "sudo: command not found" on an otherwise
+  # complete installation. `runuser` (util-linux) and `su` are part of the base
+  # system everywhere the installer supports, so prefer those and keep sudo
+  # only as a last resort.
+  local -a drop_priv
+  if command -v runuser >/dev/null 2>&1; then
+    drop_priv=(runuser -u "$SERVICE_USER" --)
+  elif command -v setpriv >/dev/null 2>&1 && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    drop_priv=(setpriv --reuid "$SERVICE_USER" --regid "$SERVICE_USER" --init-groups --)
+  elif command -v sudo >/dev/null 2>&1; then
+    drop_priv=(sudo -u "$SERVICE_USER" -H)
+  else
+    warn "No way to drop privileges (runuser, setpriv and sudo are all missing)."
+    info "Finish it yourself with: su -s /bin/sh -c 'catwaf setup --$EDITION' $SERVICE_USER"
+    return 1
+  fi
+
+  if ! "${drop_priv[@]}" \
         env CATWAF_EDITION="$EDITION" \
             CATWAF_ADMIN_PASSWORD="${CATWAF_ADMIN_PASSWORD:-}" \
             node "$INSTALL_DIR/bin/catwaf.js" "${args[@]}"; then
     warn "CatWAF setup did not complete."
-    info "Finish it yourself with: sudo -u $SERVICE_USER catwaf setup --$EDITION"
+    info "Finish it yourself with: runuser -u $SERVICE_USER -- catwaf setup --$EDITION"
     return 1
   fi
   ok "CatWAF setup complete"
@@ -603,7 +684,14 @@ summary() {
   printf '%s\n' "    catwaf status              version, edition and component health"
   printf '%s\n' "    catwaf doctor              verify this environment"
   if [ "$EDITION" = "full" ]; then
-    printf '%s\n' "    systemctl start catwaf     start the API and dashboard"
+    # Only advise systemctl when a unit was actually installed — telling a
+    # container or an init-less host to run `systemctl start catwaf` sends
+    # people to a command that cannot work.
+    if has_systemd; then
+      printf '%s\n' "    systemctl start catwaf     start the API and dashboard"
+    else
+      printf '%s\n' "    catwaf start               start the API and dashboard"
+    fi
     if [ -n "$DOMAIN" ]; then
       printf '%s\n' "    https://catwaf.$DOMAIN     your dashboard"
       printf '\n%s\n' "  ${C_BOLD}DNS${C_RESET}  point these at this server:"
@@ -649,6 +737,7 @@ main() {
   write_env
   link_cli
   maybe_install_ai
+  maybe_install_clamav
   set_permissions
   install_systemd_unit
   run_catwaf_setup || true

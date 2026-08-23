@@ -4,6 +4,12 @@ process.env.DB_DIR = DIR
 process.env.JWT_SECRET = 'a'.repeat(64)
 process.env.CADDYFILE_PATH = path.join(DIR, 'Caddyfile')
 process.env.CORAZA_AUDIT_LOG = path.join(DIR, 'logs', 'audit.json')
+
+// Never let a config reload reach a Caddy running on this machine.
+// `reloadCaddy()` POSTs to CADDY_ADMIN_URL, which defaults to Caddy's real
+// admin port — running the suite on a host where CatWAF is live would replace
+// that Caddy's configuration with this file's fixture and take the site down.
+process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
 fs.mkdirSync(path.join(DIR,'logs'),{recursive:true}); fs.writeFileSync(process.env.CORAZA_AUDIT_LOG,'')
 fs.writeFileSync(process.env.CADDYFILE_PATH, '{\n}\n\nexample.com {\n    reverse_proxy 127.0.0.1:3000\n}\n')
 const ROOT = path.join(__dirname, '..')

@@ -16,9 +16,9 @@ catwaf start
 caddy run --config ./Caddyfile
 
 # terminal 3 - generate real traffic
-curl "http://127.0.0.1:8081/"                              # allowed
-curl "http://127.0.0.1:8081/?id=1+UNION+SELECT+1,2,3--"    # blocked
-curl -A "sqlmap/1.0" "http://127.0.0.1:8081/"              # blocked
+curl "http://127.0.0.1/"                                   # allowed
+curl "http://127.0.0.1/?id=1+UNION+SELECT+1,2,3--"         # blocked
+curl -A "sqlmap/1.0" "http://127.0.0.1/"                   # blocked
 ```
 
 Events appear in the dashboard within ~5 seconds (the audit-log ingest interval).

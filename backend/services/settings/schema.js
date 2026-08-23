@@ -825,6 +825,49 @@ const SCHEMA = {
     },
   },
 
+  // ─── Upload malware scanning ──────────────────────────────────────────
+  upload_scan: {
+    label: 'Upload malware scanning',
+    summary: 'Scan uploaded files with a local ClamAV daemon and refuse infected ones.',
+    fields: {
+      enabled: {
+        type: 'bool', default: false, label: 'Enabled',
+        help: 'Requires a local clamd daemon. CatWAF does not install or bundle one; if it is missing, this feature reports itself unavailable.',
+      },
+      paths: {
+        type: 'list', item: 'uri', max: 50, default: ['/upload*'],
+        label: 'Paths that accept uploads',
+        help: 'Only these paths are routed through the scanner, so ordinary traffic is unaffected.',
+      },
+      methods: {
+        type: 'list', item: 'method', max: 6, default: ['POST', 'PUT', 'PATCH'],
+        label: 'Methods to scan',
+      },
+      max_scan_bytes: {
+        type: 'int', min: 1024, max: 1073741824, default: 26214400,
+        label: 'Largest body to scan (bytes)',
+        help: 'Bodies above this are handled by the oversize action rather than scanned, since buffering is bounded.',
+      },
+      oversize_action: {
+        type: 'enum', values: ['pass', 'block'], default: 'pass',
+        label: 'Action for bodies too large to scan',
+      },
+      action: { type: 'enum', values: ['block', 'flag'], default: 'block', label: 'Action when malware is found' },
+      fail_open: {
+        type: 'bool', default: true, label: 'Allow uploads through if the scanner is unavailable',
+        help: 'On by default: a stopped clamd should not take uploads down. Turn off to refuse uploads that could not be scanned.',
+      },
+      timeout_ms: { type: 'int', min: 500, max: 120000, default: 10000, label: 'Scan timeout (ms)' },
+      socket_path: { type: 'str', default: '', maxLen: 512, label: 'clamd socket path (blank = autodetect)' },
+      host: { type: 'str', default: '', maxLen: 256, label: 'clamd TCP host (blank = use the socket)' },
+      port: { type: 'int', min: 1, max: 65535, default: 3310, label: 'clamd TCP port' },
+      ban_seconds: {
+        type: 'int', min: 0, max: 2592000, default: 0,
+        label: 'Ban the uploader for (seconds, 0 = do not ban)',
+      },
+    },
+  },
+
   // ─── Shared threat network (#12) ──────────────────────────────────────
   threat_network: {
     label: 'Shared threat network',

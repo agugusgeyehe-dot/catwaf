@@ -9,14 +9,80 @@ public release. Those entries are preserved below under the release they belong 
 numbers themselves were retired, not the history. Nothing here has been deleted or
 rewritten, only re-filed.
 
-## [Unreleased] — Release hardening
+## [1.0.2] — 2026-08-13 — Upload scanning, the configuration and protection layer, and release hardening
+
+Three bodies of work land together here. They are kept as separate sections
+below because they were built separately and each stands on its own.
+
+### Upload scanning and outbound-request fixes
+
+#### Added
+
+- **Optional upload malware scanning.** Files posted to the paths you nominate
+  are scanned by a local ClamAV daemon before they reach your origin. This is
+  the only feature that puts CatWAF in the request *data* path, and only for
+  those paths — everything else still goes straight to the origin. Off by
+  default. CatWAF neither bundles nor installs an AV engine: with no local
+  `clamd`, `GET /api/upload-scan/status` reports the scanner unavailable rather
+  than failing requests, and `fail_open` (on by default) decides what happens to
+  an upload that could not be scanned. Buffering is bounded by
+  `max_scan_bytes`, so an upload of any size costs a fixed amount of memory.
+  `setup.sh --with-clamav` installs the daemon; the feature still stays off
+  until enabled in Settings. New `upload_scan` settings group, new
+  `POST /api/upload-scan/test` (send EICAR through it to prove the wiring), and
+  a new `upload_malware` ban source. See
+  [`docs/protection.md`](docs/protection.md#upload-malware-scanning).
+- **`GET /api/sensitive/levels`** reports what each Sensitive File Level
+  actually is, measured from the wordlists on disk rather than described. It
+  reports the enforced path count separately from the list size, because only
+  the first 500 paths of each level reach the Caddyfile — "SFL1 is on" has never
+  meant all 61,882 of its paths are blocked, and the API now says so.
+
+#### Fixed
+
+- **Every outbound POST CatWAF made was sent with an empty body.**
+  `netGuard.guardedFetch` rebuilt the request options it passed to `fetch` and
+  never carried `body` across, so captcha verification, telemetry submission and
+  threat-network signals all transmitted nothing. The visible consequence was
+  the serious one: a challenge provider cannot verify a token it was never sent,
+  so every visitor failed the captcha and a site with the challenge gate enabled
+  locked out its own legitimate traffic. The body is now forwarded, and
+  `test/attack.test.js` asserts it — including that a 307 preserves the method
+  and body while a 302 does not replay a secret-bearing body as a GET.
+- **CatAI claimed a memory it does not have.** Asked to remember something for
+  later, it would agree. Each question is answered fresh, so it now says that
+  plainly instead. The prompt and the knowledge base agree on this.
+
+#### Security
+
+- **`js-yaml` upgraded to 4.3.1** (GHSA-5p4m-2wfm-xmqj, quadratic CPU consumption
+  in `!!omap`) and **`nanoid` to 3.3.18**. Neither was reachable with hostile
+  input — the only `yaml.load()` parses knowledge-base frontmatter shipped in the
+  repository — but both fixes were non-breaking, so they were taken rather than
+  documented. The two remaining advisories (`geoip-lite`/`ip-address` and
+  `react-router`) are unchanged and re-assessed in
+  [SECURITY.md](SECURITY.md#dependency-posture); in both cases the offered fix is
+  a downgrade or a major upgrade.
+- **CatAI no longer logs the prompt it built.** The debug line recorded the whole
+  prompt, which carries the operator's question and the live configuration
+  retrieved for it. It now records the size only.
+
+#### Changed
+
+- The CatAI dock's header and footer act as a drag handle, so the whole chat
+  panel can be repositioned rather than only the toggle button.
+- `test/edition.test.js` asserts that `catwaf version` prints a bare semver
+  matching `package.json`, instead of a hardcoded literal that had to be
+  hand-edited every release.
+
+### Release hardening
 
 Fixes for the problems that stopped CatWAF from being installable and usable by
 someone who is not the person who wrote it: signing in, reaching the dashboard
 from an address other than the one it was set up on, and a default that made
 every protected site depend on the CatWAF admin process.
 
-### Security
+#### Security
 
 - **Signing out did not end the session.** `session.close()` deleted the session
   record, but `touch()` treats a missing record as valid — deliberately, so a
@@ -43,7 +109,7 @@ every protected site depend on the CatWAF admin process.
   `test/waf-e2e.test.js`; verified manually — with the API stopped, protected
   sites still serve 200 and still block 403.
 
-### Fixed
+#### Fixed
 
 - **The login loop.** `AuthProvider.login()` dispatched `catwaf-auth-changed`,
   whose handler re-verified the session it had just created. Every failure of
@@ -91,7 +157,7 @@ every protected site depend on the CatWAF admin process.
 - **The first-run wizard passed `{ quick: true }`**, an option `discover()`
   never had, so it ran the full HTTP-probing pass instead of the quick one.
 
-### Added
+#### Added
 
 - **`/api/apps` — the application pipeline over HTTP.** `discover`, `preview`,
   `protect` and `verify` were reachable only from `catwaf auto` and the test
@@ -111,7 +177,7 @@ every protected site depend on the CatWAF admin process.
   reference is checked against the schema, and the unit and API suites run on
   every push. Plus issue templates and a private security-reporting link.
 
-### Changed
+#### Changed
 
 - `README`, `CHANGELOG`, `CONTRIBUTING`, `SECURITY`, `ROADMAP` and `TRADEMARKS`
   are back at the repository root, where GitHub renders them and where the
@@ -123,16 +189,16 @@ every protected site depend on the CatWAF admin process.
   `upgrade-insecure-requests` on for a deployment behind a TLS terminator
   CatWAF cannot detect, `false` forces them off.
 
-## [Unreleased] — The configuration and protection layer
+### The configuration and protection layer
 
-CatWAF gains a declarative settings layer covering roughly 290 switches across 38
+CatWAF gains a declarative settings layer covering roughly 300 switches across 40
 groups, a runtime protection layer that decides about a *client* before the rule
 engine inspects the *request*, and the operational surface to run both.
 
 Everything new is **opt-in**. A default install renders a byte-identical Caddyfile to
 the one it rendered before, which `test/render.test.js` guards directly.
 
-### Added
+#### Added
 
 - **Settings layer.** One declarative schema drives validation, the API, the CLI, the
   dashboard controls, preview, and snapshot/rollback. Adding a setting is a schema entry
@@ -186,7 +252,7 @@ the one it rendered before, which `test/render.test.js` guards directly.
   own output and checks the Reed-Solomon syndromes), `test/extensions.test.js` and
   `test/render.test.js` (six configurations validated by the real `caddy` binary).
 
-### Fixed
+#### Fixed
 
 - **A CIDR ban was not enforced until its cache expired.** Range bans are served from a
   short-lived cache that writes did not invalidate, so for up to five seconds an address
@@ -195,7 +261,7 @@ the one it rendered before, which `test/render.test.js` guards directly.
 - **The TOTP code used to confirm enrollment could be replayed to log in** for the
   remainder of its 30-second window. Confirmation now spends the code, as a login does.
 
-### Changed
+#### Changed
 
 - Three new SQLite tables (`active_bans`, `ban_history`, `list_entries`), created on
   open — an existing database upgrades on first boot with no migration step.
@@ -210,7 +276,7 @@ the one it rendered before, which `test/render.test.js` guards directly.
 - New optional environment variables, all documented in `.env.example`:
   `CATWAF_EXTRA_HOSTS`, `CATWAF_ASN_MAP`, `CATWAF_PLUGIN_KEYS`, `CATWAF_INTERNAL_HOST`.
 
-### Notes
+#### Notes
 
 - `mtls.verify_depth` and `access.file_cache_size` are recorded but not renderable —
   Caddy exposes no equivalent. They report themselves as skipped rather than silently

@@ -22,14 +22,56 @@ const REDACTED = '__catwaf_unchanged__'
 // reloadAllFromDb(), which configTx's rollback path calls.
 const cache = new Map()
 
+// CatWAF is not one process. The CLI (`catwaf settings upload_scan
+// enabled=true`), the API server and any job runner each hold their own copy
+// of this cache, and a write in one of them used to be invisible to the
+// others until they restarted — so enabling upload scanning from the CLI
+// rendered the gate into the Caddyfile while the running backend went on
+// believing the feature was off and forwarded malware to the origin.
+//
+// Every write bumps a revision counter in the same SQLite table the settings
+// live in. Readers re-check that single row at most once a second and drop
+// the whole cache when it moves. That keeps the hot path to one tiny indexed
+// read per second instead of one per group per request, and bounds
+// cross-process staleness to REV_CHECK_MS.
+const REV_KEY = KEY_PREFIX + '__rev'
+const REV_CHECK_MS = 1000
+let seenRev
+let lastRevCheck = 0
+
 function storageKey(group) { return KEY_PREFIX + group }
 
 function isGroup(group) {
   return typeof group === 'string' && Object.hasOwn(SCHEMA, group)
 }
 
+// Bumped by every write path. Failure here must never break the write itself —
+// a missed bump costs freshness, not correctness, and the writer's own cache
+// is updated directly anyway.
+function bumpRev() {
+  try {
+    const next = (Number(db.getState(REV_KEY)) || 0) + 1
+    db.setState(REV_KEY, next)
+    seenRev = next
+    lastRevCheck = Date.now()
+  } catch {}
+}
+
+function syncRev() {
+  const now = Date.now()
+  if (now - lastRevCheck < REV_CHECK_MS) return
+  lastRevCheck = now
+  let rev = null
+  try { rev = db.getState(REV_KEY) } catch { return }
+  if (rev !== seenRev) {
+    seenRev = rev
+    cache.clear()
+  }
+}
+
 function get(group) {
   if (!isGroup(group)) throw new Error(`Unknown settings group "${group}"`)
+  syncRev()
   if (cache.has(group)) return cache.get(group)
   const stored = db.getState(storageKey(group))
   const value = { ...defaultsFor(group), ...(stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {}) }
@@ -102,6 +144,7 @@ function set(group, patch, { merge = true } = {}) {
   if (!v.ok) return v
   db.setState(storageKey(group), v.value)
   cache.set(group, v.value)
+  bumpRev()
   return { ok: true, value: v.value, redacted: redact(group, v.value) }
 }
 
@@ -112,6 +155,7 @@ function replace(group, value) {
   const merged = { ...defaultsFor(group), ...(value && typeof value === 'object' ? value : {}) }
   db.setState(storageKey(group), merged)
   cache.set(group, merged)
+  bumpRev()
 }
 
 function reset(group) {
@@ -119,6 +163,7 @@ function reset(group) {
   const value = defaultsFor(group)
   db.setState(storageKey(group), value)
   cache.set(group, value)
+  bumpRev()
   return { ok: true, value, redacted: redact(group, value) }
 }
 
@@ -133,7 +178,7 @@ function restore(snap) {
   }
 }
 
-function reloadAllFromDb() { cache.clear() }
+function reloadAllFromDb() { cache.clear(); seenRev = undefined; lastRevCheck = 0 }
 
 // Schema shipped to the dashboard so controls, help text and validation
 // messages all come from the same definition the backend enforces.

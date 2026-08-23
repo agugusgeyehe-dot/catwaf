@@ -3,7 +3,13 @@ const rulesSvc = require('./rules')
 const requestLog = require('./requestLog')
 const simulateSvc = require('./simulate')
 
-const EVENT_ID_RE = /^[a-f0-9]{4,32}$/i
+// Event IDs are Coraza's own transaction `unique_id`, which is base62 —
+// e.g. "YVYGcgFPqYkthynI". A hex-only pattern rejected every ID that
+// `catwaf audit` prints, so `catwaf explain <id>` and `catwaf replay <id>`
+// only ever worked via `--last`. Kept to an alphanumeric character class so
+// this is still a whitelist and never reaches the database with anything
+// path-, quote- or wildcard-shaped.
+const EVENT_ID_RE = /^[A-Za-z0-9]{4,64}$/
 
 const SENSITIVE_QUERY_KEYS = /^(pass|passwd|password|pwd|token|secret|api[_-]?key|apikey|auth|authorization|session|sid|jwt|access[_-]?token|refresh[_-]?token|credential|signature|sig)$/i
 
@@ -127,7 +133,7 @@ function explain(eventIdOrOptions) {
     if (!event) return { ok: false, error: 'No events have been recorded yet. Send traffic through the WAF first.' }
   } else {
     if (!isValidEventId(opts.id)) {
-      return { ok: false, error: 'Event ID must be a hexadecimal identifier. Use `catwaf explain --last` for the most recent event.' }
+      return { ok: false, error: 'Event ID must be alphanumeric. Use `catwaf explain --last` for the most recent event.' }
     }
     event = requestLog.getById(opts.id)
     if (!event) return { ok: false, error: `No event found with ID "${opts.id}".` }
@@ -209,7 +215,7 @@ async function replay(opts = {}) {
     return { ok: false, error: 'Replay only runs against CatWAF\'s local simulation sandbox. Replaying against a live upstream is not supported.' }
   }
   if (!isValidEventId(id)) {
-    return { ok: false, error: 'Event ID must be a hexadecimal identifier.' }
+    return { ok: false, error: 'Event ID must be alphanumeric.' }
   }
 
   const event = requestLog.getById(id)
