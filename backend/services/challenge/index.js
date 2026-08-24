@@ -32,6 +32,11 @@ const pending = new Map()
 const attempts = new Map()
 
 const MAX_PENDING = 20000
+// Failure counters are keyed per address. The address is now Caddy-asserted,
+// but a flood of distinct real (or proxy-spoofed) addresses must still not
+// grow this map without bound: entries expire on their own, and this cap
+// drops the oldest beyond it.
+const MAX_ATTEMPTS_ENTRIES = 10000
 
 function key(label, input = '') { return secrets.derive(`challenge/${label}`, input) }
 
@@ -85,7 +90,15 @@ function parseCookies(header) {
   for (const part of String(header || '').split(';')) {
     const idx = part.indexOf('=')
     if (idx === -1) continue
-    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim())
+    const name = part.slice(0, idx).trim()
+    const raw = part.slice(idx + 1).trim()
+    // A malformed escape (e.g. "catwaf_ch=%") must not throw: this runs on
+    // every request carrying a Cookie header, including the pre-auth
+    // challenge endpoints and Caddy's forward_auth hop — an exception here
+    // would 500 the challenge page or hang enforcement for that visitor.
+    let value = raw
+    try { value = decodeURIComponent(raw) } catch {}
+    if (name) out[name] = value
   }
   return out
 }
@@ -100,11 +113,14 @@ function isVerified(req) {
 }
 
 function clientIp(req) {
-  return normalizeClientIp(
-    req.headers?.['x-real-ip'] ||
-    String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() ||
-    req.ip || ''
-  )
+  // Mirrors routes/gateway.js forwardedIp(): the rendered Caddy config
+  // overwrites X-Real-IP with the real connection address on every hop into
+  // CatWAF, so it is authoritative here. X-Forwarded-For is deliberately not
+  // consulted — its first entry is visitor-controlled, and trusting it let a
+  // banned or rate-limited client rotate identity per request.
+  const real = req.headers?.['x-real-ip'] || req.headers?.['x-catwaf-client-ip']
+  if (real) return normalizeClientIp(String(real).split(',')[0].trim())
+  return normalizeClientIp(req.ip || '')
 }
 
 // ─── Scoping (#4) ───────────────────────────────────────────────────────
@@ -147,6 +163,13 @@ function shouldChallenge(ctx) {
   if (cfg.mode === 'off') return { challenge: false }
   const exempt = isExempt(ctx)
   if (exempt.exempt) return { challenge: false, reason: `exempt: ${exempt.why}` }
+  // Under-attack mode overrides the trigger selector: every non-exempt
+  // visitor proves they run JavaScript until the switch is turned off.
+  try {
+    if (require('../settings').get('ddos').emergency) {
+      return { challenge: true, mode: cfg.mode, reason: 'emergency mode' }
+    }
+  } catch { /* ddos group not present in old state — fall through */ }
   if (cfg.trigger === 'suspicious' && !ctx.suspicious) return { challenge: false, reason: 'not flagged by any other signal' }
   return { challenge: true, mode: cfg.mode }
 }
@@ -233,6 +256,15 @@ function recordAttempt(ip) {
   const entry = attempts.get(clean) || { count: 0, expires: Date.now() + cfg.resolve_seconds * 1000 * 4 }
   entry.count++
   attempts.set(clean, entry)
+  if (attempts.size > MAX_ATTEMPTS_ENTRIES) {
+    for (const [ipKey, e] of attempts) {
+      if (attempts.size <= MAX_ATTEMPTS_ENTRIES) break
+      if (e.expires <= Date.now()) attempts.delete(ipKey)
+    }
+    while (attempts.size > MAX_ATTEMPTS_ENTRIES) {
+      attempts.delete(attempts.keys().next().value)
+    }
+  }
   return entry.count
 }
 

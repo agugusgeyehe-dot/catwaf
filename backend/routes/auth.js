@@ -42,7 +42,14 @@ router.post('/api/auth/login', loginRateLimit, async (req, res, next) => {
   let ok
   try {
     ok = await passwordHash.compare(password, (u && typeof u.password_hash === 'string') ? u.password_hash : DUMMY_HASH)
-  } catch (e) { return next(e) }
+  } catch (e) {
+    // A saturated worker queue means the login pipeline is overwhelmed —
+    // answer 429 rather than a misleading 500.
+    if (e.message === 'password queue full') {
+      return res.status(429).json({ detail: 'Too many concurrent logins. Try again shortly.' })
+    }
+    return next(e)
+  }
 
   if (!u || !ok) {
     auditSvc.audit({ user: { username: 'anonymous' }, ip: req.ip }, 'auth.login-failed', String(username || '').slice(0, 64))
@@ -139,8 +146,11 @@ router.get('/api/handshake', (req, res) => {
   } catch {
     return res.status(401).json({ detail: 'This session could not be verified. Log in again.', code: 'SESSION_UNVERIFIED' })
   }
-  if (check && check.ok === false) {
-    return res.status(401).json({ detail: check.detail, code: check.code })
+  // Fail closed on any non-positive answer — a falsy or shapeless return
+  // means "could not confirm the session is live", and this endpoint hands
+  // out the gate path, so that must never mean "here you go".
+  if (!check || check.ok === false) {
+    return res.status(401).json({ detail: (check && check.detail) || 'This session could not be verified. Log in again.', code: (check && check.code) || 'SESSION_UNVERIFIED' })
   }
   res.json({ api: currentSegment(), user: { username: req.user.username, role: req.user.role } })
 })

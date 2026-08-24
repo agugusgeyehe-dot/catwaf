@@ -36,9 +36,21 @@ const logger = require('./logger')
 const { ipCoveredBy, normalizeClientIp } = require('./sanitize')
 
 const log = logger.child('enforce')
+const counters = require('./counters')
 const NS = 'verdict'
 const VERDICT_TTL_MS = 20_000
+const VERDICT_TTL_EMERGENCY_MS = 2_000
 const DEADLINE_MS = 2500
+
+// Under-attack mode shortens every cached verdict so lifting the switch
+// takes effect within seconds instead of twenty.
+function verdictTtl() {
+  try {
+    const ddos = settings.get('ddos')
+    if (!ddos.emergency) return VERDICT_TTL_MS
+    return Math.max(1, Number(ddos.verdict_ttl_seconds) || 2) * 1000
+  } catch { return VERDICT_TTL_MS }
+}
 
 // Which settings groups, when on, mean the forward_auth hop is worth
 // rendering at all. Kept next to the pipeline so the renderer and the
@@ -46,8 +58,18 @@ const DEADLINE_MS = 2500
 const RUNTIME_GROUPS = [
   'challenge', 'greylist', 'asn_lists', 'rdns_lists', 'dnsbl',
   'community_lists', 'threat_feed', 'threat_network', 'client_probe', 'bad_behavior',
-  'tools_fingerprint',
+  'tools_fingerprint', 'canary',
 ]
+
+// Canary paths are intent, not traffic: no legitimate visitor ever requests
+// them, so the first hit earns an escalating ban before Coraza even sees a
+// payload. Purely local — same tier as tool fingerprinting.
+function canaryMatches(uri) {
+  const cfg = settings.get('canary')
+  if (!cfg.enabled || !cfg.paths.length) return false
+  const path = String(uri || '/').split('?')[0]
+  return cfg.paths.some(p => (p.endsWith('*') ? path.startsWith(p.slice(0, -1)) : path === p))
+}
 
 function isActive() {
   for (const group of RUNTIME_GROUPS) {
@@ -88,7 +110,7 @@ async function gather(tasks) {
   return results
 }
 
-async function classify(request) {
+async function classify(request, { dryRun = false } = {}) {
   const ip = normalizeClientIp(request.ip || '')
   const uri = String(request.uri || '/')
   const userAgent = request.userAgent || ''
@@ -114,6 +136,16 @@ async function classify(request) {
     }
   }
 
+  // In dry-run mode ("why would this address be treated this way?") the
+  // pipeline reports what it *would* do without writing any ban or making
+  // outbound probe connections — a test must never punish the subject it is
+  // testing, whoever is asking.
+  const wouldBan = []
+  const recordWouldBan = (source, seconds, reason) => {
+    wouldBan.push({ source, seconds, reason })
+    signals.push({ source, decision: 'ban', reason })
+  }
+
   // 2.5. Tool fingerprinting is local/synchronous — no round trip — so it
   //      runs before anything network-bound, same as the ban lookup above.
   //      An exact signature match is high-confidence enough to ban outright;
@@ -126,17 +158,22 @@ async function classify(request) {
       { closeThreshold: fpCfg.close_threshold / 100 }
     )
     if (fp && fp.tier === 'exact') {
-      bans.ban({
-        target: ip,
-        source: 'tools_fingerprint',
-        reason: `Fingerprinted as ${fp.tool} (exact match).`,
-        seconds: fpCfg.ban_seconds,
-        escalateRepeat: fpCfg.escalate,
-      })
+      if (dryRun) {
+        recordWouldBan('tools_fingerprint', fpCfg.ban_seconds, `Fingerprinted as ${fp.tool} (exact match).`)
+      } else {
+        bans.ban({
+          target: ip,
+          source: 'tools_fingerprint',
+          reason: `Fingerprinted as ${fp.tool} (exact match).`,
+          seconds: fpCfg.ban_seconds,
+          escalateRepeat: fpCfg.escalate,
+        })
+      }
       return {
         action: 'block',
         reason: `Detected as ${fp.tool}.`,
         signals: [{ source: 'tools_fingerprint', decision: 'block', tool: fp.tool }],
+        ...(dryRun ? { would_ban: wouldBan } : {}),
       }
     }
     if (fp && fp.tier === 'close') {
@@ -147,6 +184,21 @@ async function classify(request) {
         tool: fp.tool,
       })
     }
+  }
+
+  // 2.75. Canary probe → immediate ban. Runs before anything network-bound.
+  if (canaryMatches(uri)) {
+    const cfg = settings.get('canary')
+    const reason = `Requested a canary path (${uri.split('?')[0]})`
+    if (dryRun) {
+      // recordWouldBan already appends the signal — pushing twice would
+      // duplicate it in the response.
+      recordWouldBan('canary', cfg.ban_seconds, reason)
+      return { action: 'block', reason, signals, would_ban: wouldBan }
+    }
+    counters.incr('canary_hits_total')
+    bans.ban({ target: ip, source: 'canary', reason, seconds: cfg.ban_seconds, escalateRepeat: cfg.escalate })
+    return { action: 'block', reason, signals: [{ source: 'canary', decision: 'block', reason }] }
   }
 
   const country = request.country || geoip.lookup(ip)?.country_code || null
@@ -191,21 +243,27 @@ async function classify(request) {
 
   const banSignal = signals.find(s => s.decision === 'ban')
   if (banSignal) {
-    bans.ban({
-      target: ip,
-      source: banSignal.source,
-      seconds: banSignal.banSeconds || 3600,
-      reason: banSignal.reason,
-      escalateRepeat: false,
-    })
-    return { action: 'block', reason: banSignal.reason, signals, asn: asnNumber, rdns: rdnsName }
+    if (!dryRun) {
+      bans.ban({
+        target: ip,
+        source: banSignal.source,
+        seconds: banSignal.banSeconds || 3600,
+        reason: banSignal.reason,
+        escalateRepeat: false,
+      })
+    } else {
+      wouldBan.push({ source: banSignal.source, seconds: banSignal.banSeconds || 3600, reason: banSignal.reason })
+    }
+    return { action: 'block', reason: banSignal.reason, signals, asn: asnNumber, rdns: rdnsName, ...(dryRun ? { would_ban: wouldBan } : {}) }
   }
 
   const suspicious = signals.some(s => s.decision === 'flag' || s.decision === 'challenge')
 
   // Relay probing is last and only for an already-suspicious client, so an
   // ordinary visitor never pays its latency (idea #5's stated tradeoff).
-  if (settings.get('client_probe').enabled) {
+  // Skipped entirely in dry-run mode: it makes live outbound connections to
+  // the address under test.
+  if (!dryRun && settings.get('client_probe').enabled) {
     try {
       const verdict = await probe.evaluate(ip, { suspicious })
       if (verdict) {
@@ -247,15 +305,20 @@ async function evaluate(request) {
   const ip = normalizeClientIp(request.ip || '')
   if (!ip) return { action: 'allow', reason: 'No client address.', signals: [], cached: false }
 
-  const cached = cache.get(NS, ip)
-  if (cached && cached.action !== 'challenge') {
-    return { ...cached, cached: true }
+  // The cache is keyed by address only, but the canary signal is
+  // path-dependent: an allow earned on "/" must never excuse "/.env", so
+  // canary-touching requests always run the full classification.
+  if (!canaryMatches(String(request.uri || '/'))) {
+    const cached = cache.get(NS, ip)
+    if (cached && cached.action !== 'challenge') {
+      return { ...cached, cached: true }
+    }
   }
 
   const verdict = await classify(request)
   // A challenge verdict is not cached: whether this particular request needs
   // one depends on its path and on the cookie it carries.
-  if (verdict.action !== 'challenge') cache.set(NS, ip, verdict, VERDICT_TTL_MS)
+  if (verdict.action !== 'challenge') cache.set(NS, ip, verdict, verdictTtl())
   return { ...verdict, cached: false }
 }
 

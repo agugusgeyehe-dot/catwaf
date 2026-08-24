@@ -152,13 +152,18 @@ function previewSettings(group, patch) {
 }
 
 function previewWaf(patch) {
+  // Same validation a real apply runs — a preview must not render values
+  // that could never be saved.
+  const check = require('./sanitize').validateWafState(patch || {})
+  if (!check.valid) return { ok: false, phase: 'validate', error: check.errors.join('; ') }
+  const clean = check.sanitized
   return preview({
     label: 'waf',
     mutate: (s) => {
-      for (const [key, value] of Object.entries(patch || {})) {
+      for (const [key, value] of Object.entries(clean)) {
         if (Object.hasOwn(s.WAF, key)) s.WAF[key] = value
       }
-      return { fields: Object.keys(patch || {}) }
+      return { fields: Object.keys(clean) }
     },
   })
 }

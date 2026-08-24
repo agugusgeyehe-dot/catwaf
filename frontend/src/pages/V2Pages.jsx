@@ -240,15 +240,36 @@ export function AlertsV2Page() {
   const [cfg, setCfg] = useState({ slack_webhook:'', telegram_bot_token:'', telegram_chat_id:'', discord_webhook:'', custom_webhook:'', email_to:'', spike_threshold:100, alert_on_block:true, alert_on_spike:true, alert_on_engine_change:true })
   const [busy, setBusy] = useState(false)
   const [testing, setTesting] = useState('')
+  const [dispatchEnabled, setDispatchEnabled] = useState(null)
+  const [dispatchBusy, setDispatchBusy] = useState(false)
   const { toast, show, hide } = useToast()
 
   useEffect(() => { api.get('/alerts').then(d=>setCfg(c=>({...c,...d}))).catch(()=>{}) }, [])
+  useEffect(() => {
+    api.get('/settings/alert_dispatch')
+      .then(d => setDispatchEnabled(!!d.values?.enabled))
+      .catch(() => {})
+  }, [])
 
   const save = async () => {
     setBusy(true)
     try { await api.post('/alerts', cfg); show('Alert settings saved!') }
     catch(e) { show(e.message,'error') }
     finally { setBusy(false) }
+  }
+
+  const updateDispatch = async v => {
+    setDispatchBusy(true)
+    try {
+      const res = await api.patch('/settings/alert_dispatch', { enabled: v })
+      setDispatchEnabled(!!res.values?.enabled)
+      show(
+        res.reloaded === false && res.reload_error ? `Saved, but Caddy did not reload: ${res.reload_error}` : `Alert delivery ${v ? 'enabled' : 'disabled'}`,
+        res.reload_error ? 'error' : 'success',
+      )
+    }
+    catch(e) { show(e.message,'error') }
+    finally { setDispatchBusy(false) }
   }
 
   const test = async (channel) => {
@@ -293,6 +314,13 @@ export function AlertsV2Page() {
         </div>
       </div>
 
+      <div className="card mb-4">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-cat-text">Deliver alerts automatically</span>
+          <Toggle on={!!dispatchEnabled} onChange={updateDispatch} disabled={dispatchBusy || dispatchEnabled === null}/>
+        </div>
+      </div>
+
       <div className="space-y-3">
         {channels.map(ch => {
           const Icon = ch.icon
@@ -315,6 +343,8 @@ export function AlertsV2Page() {
           )
         })}
       </div>
+
+      <p className="text-[11px] text-cat-sub mt-3">Delivery runs only when enabled here AND a channel URL is saved.</p>
 
       <ActionBar>
         <button className="btn btn-primary" onClick={save} disabled={busy}>

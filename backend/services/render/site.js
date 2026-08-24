@@ -84,7 +84,12 @@ function challengeRoutes(ctx, out) {
       `reverse_proxy ${q(ctx.backend)} {`,
       ...indent([
         'header_up X-CatWAF-Challenge 1',
+        // The backend keys challenges, attempt counters and solved-token
+        // bindings to the address these headers carry. Both are overwritten
+        // here because a visitor can set either freely — trusting them
+        // unedited would let a banned visitor rotate identity per request.
         'header_up X-Real-IP {http.request.remote.host}',
+        'header_up X-CatWAF-Client-IP {http.request.remote.host}',
       ], 1),
       '}',
     ]),
@@ -112,6 +117,13 @@ function enforcementGate(ctx, out) {
     // Shared secret so the enforcement endpoint is only usable by this
     // instance's own Caddy, not by anything else that can reach the port.
     `header_up X-CatWAF-Enforce-Key ${q(secrets.derive('enforce-key'))}`,
+    // forward_auth proxies the visitor's original request, original headers
+    // included — and X-Real-IP / X-CatWAF-Client-IP are visitor-settable.
+    // Overwrite both with the real connection address or every ban,
+    // allowlist hit and fingerprint decision below keys off an address the
+    // visitor chose (and bans land on whoever the visitor named).
+    `header_up X-Real-IP {http.request.remote.host}`,
+    `header_up X-CatWAF-Client-IP {http.request.remote.host}`,
     `copy_headers ${q('X-CatWAF-Verdict')}`,
   ]
   // The challenge endpoints must not themselves be gated, or a challenged
@@ -159,6 +171,11 @@ function uploadScanGate(ctx, out) {
       `header_up X-CatWAF-Upload-Key ${q(secrets.derive('upload-gate-key'))}`,
       `header_up X-CatWAF-Upload-Upstream ${q(upstream)}`,
       'header_up X-CatWAF-Upload-Path {http.request.uri}',
+      // Bans raised by the upload scanner key off the client address these
+      // headers carry — overwrite them so a visitor cannot aim a malware
+      // ban at someone else's address.
+      'header_up X-Real-IP {http.request.remote.host}',
+      'header_up X-CatWAF-Client-IP {http.request.remote.host}',
       // The gate lives at a fixed path, so the original URI travels in the
       // header above and is restored when the request is forwarded on.
       `rewrite ${q('/api/upload-gate')}`,

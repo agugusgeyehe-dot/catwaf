@@ -16,7 +16,9 @@ export function ActionCard({ action, onResolved }) {
   async function confirm() {
     setBusy(true); setError('')
     try {
-      const res = await api.post('/catai/apply', { actionId: action.actionId, params: action.params })
+      // Clicking Apply is the explicit human confirmation; weakening
+      // actions require it server-side as well.
+      const res = await api.post('/catai/apply', { actionId: action.actionId, params: action.params, confirm_weaken: true })
       setDone({ undoId: res.undoId })
       onResolved?.()
     } catch (e) {
@@ -42,7 +44,7 @@ export function ActionCard({ action, onResolved }) {
     setBusy(true); setError('')
     try {
       const params = { ...action.params, [missingParamKey(action.missing)]: inputValue.trim() }
-      const res = await api.post('/catai/apply', { actionId: action.actionId, params })
+      const res = await api.post('/catai/apply', { actionId: action.actionId, params, confirm_weaken: true })
       setDone({ undoId: res.undoId })
       onResolved?.()
     } catch (e) {

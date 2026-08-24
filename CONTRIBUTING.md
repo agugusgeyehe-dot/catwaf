@@ -34,7 +34,7 @@ frontend/
 bin/catwaf.js     # the CLI entry point
 src/tui/          # the CLI's commands, terminal UI and doctor checks
 scripts/          # dev/start wrappers, Caddy fetch, settings-doc generator
-test/             # 21 suites — see "Running the tests"
+test/             # 26 suites — 24 in the `npm test` chain + browser/auth (see below)
 docker/           # Dockerfiles + Caddyfile for the compose stack
 logo/             # brand assets (see logo/README.md)
 docs/             # setup + feature guides
@@ -51,7 +51,7 @@ See [docs/architecture.md](docs/architecture.md) for what each service does.
 ## Running the tests
 
 ```bash
-npm test              # the 19 core suites
+npm test              # the 24 core suites (includes real-Caddy E2E when Caddy is present)
 npm run test:unit     # the 14 that need no Caddy binary
 npm run test:frontend # adds the Playwright smoke test (needs a browser)
 npm run test:all      # everything
@@ -72,12 +72,15 @@ Coraza and **skip rather than fail** when that binary is not installed:
 
 ```bash
 node --experimental-sqlite test/security.test.js          #  52 checks — request signing, replay, tampering
-node --experimental-sqlite test/attack.test.js            # 139 checks — hostile input across every route
+node --experimental-sqlite test/attack.test.js          # 142 checks — hostile input across every route
+node --experimental-sqlite test/concurrency.test.js     #  16 checks — cross-process locking, no lost updates (spawns children)
+node --experimental-sqlite test/trust-proxy.test.js     #   4 checks — forwarded-header trust inference, four deployment shapes
+node --experimental-sqlite test/features.test.js        #  32 checks — canary, edge bans, kernel rulesets, alert dispatch, backup restore
 node --experimental-sqlite test/catai.test.js             #  66 checks — retrieval, extraction, action safety
-node --experimental-sqlite test/platform.test.js          # 105 checks — packaging, platform assumptions
+node --experimental-sqlite test/platform.test.js          # 110 checks — packaging, platform assumptions, SSRF-guard invariants
 node --experimental-sqlite test/waftools.test.js          # 167 checks — rules, modes, snapshots, simulate
 node --experimental-sqlite test/edition.test.js           # 166 checks — editions, CLI, docker, GeoIP, setup.sh
-node --experimental-sqlite test/subdomain.test.js         #  38 checks — rotating path segment, decoy responses
+node --experimental-sqlite test/subdomain.test.js         #  39 checks — rotating path segment, decoy responses
 node --experimental-sqlite test/discovery.test.js         # 291 checks — runtime/webserver/container discovery
 node --experimental-sqlite test/audit-log.test.js         #  37 checks — Coraza audit ingestion
 node --experimental-sqlite test/audit-rotation.test.js    #  61 checks — audit-log rotation and retention
@@ -90,11 +93,14 @@ node --experimental-sqlite test/render.test.js            #  12 checks — six c
 node --experimental-sqlite test/protect-e2e.test.js       #  33 checks — protect flow end to end
 node --experimental-sqlite test/waf-e2e.test.js           #  36 checks — real Coraza blocking end to end
 node --experimental-sqlite test/sfl-e2e.test.js           #  39 checks — real sensitive-file blocking, SFL1-4 cumulative
+node --experimental-sqlite test/edge-e2e.test.js         #  13 checks — banned source aborted by real Caddy at the edge; un-ban propagates via reload
 ```
 
-**1,564 checks** in total for `npm test`. Two further suites need a browser or a
-running backend and are not in that number: `test/frontend-smoke.test.js` and
-`test/auth-flow.test.js`.
+**~1,642 checks** in total for `npm test`. Two further suites need extra
+prerequisites — a browser or a running backend — and are not in that number:
+`test/frontend-smoke.test.js` (44 checks, walks every dashboard route in real
+Chromium) and `test/auth-flow.test.js` (27 checks, full login → TOTP → LAN-CORS
+flow in the browser).
 
 Coverage is real but not complete: request signing, CatAI's deterministic half, the WAF
 tooling, the edition model and the CLI surface are well covered; most individual route

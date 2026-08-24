@@ -480,6 +480,19 @@ Nothing was applied.
 
 ## Operate the protection layer
 
+### `catwaf update`
+
+```bash
+catwaf update            # check GitHub for a newer release
+catwaf update --force    # skip the 24h cache
+```
+
+Read-only: CatWAF never downloads or installs anything itself. When a newer
+release exists you get its version, release-notes link, and the manual upgrade
+steps (download the tagged `setup.sh`, read it, run it). If the repository has
+no published releases yet, the command says so plainly. A daily background job
+feeds the same answer to the dashboard's diagnostics.
+
 ### `catwaf jobs`
 ```
 catwaf jobs [list]                # every job, its interval and last run
@@ -504,7 +517,8 @@ checks that means a visible pause on the first request from an address.
 ### `catwaf backup`
 ```
 catwaf backup [list]
-catwaf backup now [--dry-run] [--destination <dir>]
+catwaf backup now
+  catwaf backup restore <backup.json> [--db] [--allow-redacted] [--confirm-db-restore] [--dry-run] [--destination <dir>]
 catwaf backup verify [--destination <dir>]
 ```
 
@@ -634,3 +648,16 @@ documented meanings, which callers depend on:
 
 Stack traces are never shown to normal users. Set `CATWAF_DEBUG=1` to print
 them when diagnosing a CLI error.
+
+
+## kernel-bans
+
+Status for kernel-level drops, plus the one-time nftables ruleset:
+
+```bash
+catwaf kernel-bans              # preflight + status
+catwaf kernel-bans print-rules  # emit the ruleset (pipe into sudo nft -f -)
+```
+
+See [Protection](protection.md#kernel-level-drops-opt-in).
+

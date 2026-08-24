@@ -66,7 +66,8 @@ ${c('Protection & configuration', C.bold)}
   template <sub>     Configuration templates (list, save, apply, remove)
   jobs <sub>         Scheduled jobs (list, run)
   cache <sub>        Cached lookups (list, clear, refresh)
-  backup <sub>       Backups (now, list, verify)
+  backup <sub>       Backups (now, list, verify, restore)
+  kernel-bans        Kernel-level drops status (print-rules emits the nft ruleset)
   report             Export activity over a date range
   2fa <sub>          Two-factor login (status, enroll, confirm, disable, codes)
 
@@ -76,6 +77,7 @@ ${c('Service', C.bold)}
   restart            Restart CatWAF
   status             Version, edition, protection, Caddy and recent activity
   logs               Show CatWAF logs
+  update             Check GitHub for a newer CatWAF release
   docker <sub>       Manage the Docker stack ${c('(Full only)', C.dim)}
 
 ${c('Administration', C.bold)}
@@ -704,6 +706,10 @@ function ext() {
   return require(path.join(PROJECT_ROOT, 'src', 'tui', 'commands.js'))
 }
 
+function kv2(k, v) {
+  console.log('  ' + k.padEnd(20) + String(v))
+}
+
 async function cmdDoctor(flags) {
   const doctor = require(path.join(PROJECT_ROOT, 'src', 'tui', 'doctor.js'))
   return doctor.run({ json: !!flags.json, verbose: !!(flags.verbose || flags.v) })
@@ -1273,6 +1279,41 @@ async function main() {
     case 'job': return await ext().cmdJobs(rest, flags)
     case 'backup':
     case 'backups': return await ext().cmdBackup(rest, flags)
+    case 'update': {
+      const uc = require(path.join(PROJECT_ROOT, 'backend', 'services', 'updateCheck'))
+      const r = await uc.check({ force: !!flags.force || !!flags.check })
+      console.log(c('CatWAF update check', C.bold))
+      kv2('Running version', r.current)
+      kv2('Latest release', r.latestVersion || (r.noReleases ? c('none published yet', C.dim) : c('unknown', C.yellow)))
+      if (r.error) console.log('  ' + c('Check failed: ' + r.error, C.yellow))
+      if (r.latestVersion && !r.upToDate) {
+        for (const line of uc.upgradeInstructions(r)) console.log('  ' + c(line, C.cyan))
+      } else if (!r.noReleases && !r.error) {
+        console.log('  ' + c('✓ You are up to date.', C.green))
+      }
+      if (r.noReleases) {
+        console.log('  ' + c('No GitHub releases exist yet for ' + uc.REPO + '.', C.dim))
+        console.log('  ' + c('Publish one (tag v<version>) and this check starts working.', C.dim))
+      }
+      return 0
+    }
+    case 'kernel-bans': {
+      const kb = require(path.join(PROJECT_ROOT, 'backend', 'services', 'kernelBans'))
+      if (rest[0] === 'print-rules' || flags['print-rules']) {
+        console.log(kb.printRules())
+        return 0
+      }
+      const st = kb.status()
+      console.log(c('Kernel-level drops (nftables)', C.bold))
+      console.log('  Enabled (settings): ' + (st.enabled ? c('yes', C.green) : 'no'))
+      console.log('  Enabled (.env gate): ' + (st.env_enabled ? c('yes', C.green) : 'no'))
+      console.log('  Preflight: ' + (st.preflight.ok ? c('ok', C.green) : c(st.preflight.problems.join('; '), C.red)))
+      if (!st.preflight.ok) {
+        console.log('\n  ' + c('Firewall rule to add once (as root):', C.dim))
+        console.log('  ' + c('$ catwaf kernel-bans print-rules | sudo nft -f -', C.cyan))
+      }
+      return 0
+    }
     case 'cache':
     case 'caches': return await ext().cmdCache(rest, flags)
     case '2fa': return await ext().cmdTwoFactor(rest, flags)

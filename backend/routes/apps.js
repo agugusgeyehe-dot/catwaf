@@ -100,7 +100,7 @@ router.get('/api/apps', authRequired, (req, res) => {
 // ─── Discover ───────────────────────────────────────────────────────────
 
 // OBSERVE -> CORRELATE -> CLASSIFY, with nothing written.
-router.post('/api/apps/discover', authRequired, async (req, res) => {
+router.post('/api/apps/discover', authRequired, writeRequired, async (req, res) => {
   try {
     const report = await serialise('a discovery scan', () => discovery.discover({
       // Probing each candidate port with a real HTTP request is what
@@ -177,7 +177,7 @@ router.post('/api/apps/protect', authRequired, writeRequired, async (req, res) =
 
 // Re-runs the two real requests against what is applied right now. This is
 // the only endpoint whose answer may be presented to a user as "protected".
-router.post('/api/apps/verify', authRequired, async (req, res) => {
+router.post('/api/apps/verify', authRequired, writeRequired, async (req, res) => {
   const applied = inventory.read()
   if (!applied.ok) return res.status(500).json({ detail: applied.error })
   if (!applied.routes.length) {

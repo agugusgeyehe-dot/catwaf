@@ -24,7 +24,9 @@ router.get('/api/caddy/status', (req, res) => {
   }
   res.json({
     running: caddySvc.isCaddyRunning(),
-    caddyfile_path: caddySvc.CADDYFILE_PATH,
+    // Server filesystem layout is an admin concern; viewers get the state
+    // without the path.
+    caddyfile_path: isAdmin ? caddySvc.CADDYFILE_PATH : null,
     caddyfile,
     caddyfile_redacted: isAdmin,
     caddyfile_visible: isAdmin,

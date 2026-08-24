@@ -15,8 +15,15 @@ const API_DECOY_LINES = [
   'Meow. That is all you get.',
 ]
 
+const SENSITIVE_QUERY = /([?&](?:token|sig|password|secret|api[_-]?key)=)[^&#]*/gi
+function redactUrl(url) {
+  return String(url || '').replace(SENSITIVE_QUERY, '$1[REDACTED]')
+}
+
 function decoyNotFound(req, res) {
-  try { auditSvc.audit({ user: { username: 'probe' } }, 'security.api-probe', req.originalUrl, { method: req.method }) } catch {}
+  // The probed URL is attacker-controlled and often carries secrets in its
+  // query string — redact before it lands in the audit store.
+  try { auditSvc.audit({ user: { username: 'probe' } }, 'security.api-probe', redactUrl(req.originalUrl), { method: req.method }) } catch {}
   const line = API_DECOY_LINES[Math.floor(Math.random() * API_DECOY_LINES.length)]
   return res.status(404).json({ detail: line })
 }
@@ -26,11 +33,6 @@ function notFoundHandler(req, res) {
     return decoyNotFound(req, res)
   }
   res.status(404).json({ detail: 'Not found' })
-}
-
-const SENSITIVE_QUERY = /([?&](?:token|sig|password|secret|api[_-]?key)=)[^&#]*/gi
-function redactUrl(url) {
-  return String(url || '').replace(SENSITIVE_QUERY, '$1[REDACTED]')
 }
 
 function errorHandler(err, req, res, next) {

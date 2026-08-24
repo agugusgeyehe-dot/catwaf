@@ -52,7 +52,10 @@ async function main() {
   if (!tags) {
     if (!hasOllamaBinary()) {
       log('CatAI is enabled but Ollama isn\'t installed — the assistant will report itself unavailable until it is.')
-      log('Install it with: curl -fsSL https://ollama.com/install.sh | sh')
+      log('Install it without piping a remote script into a shell:')
+      log('  curl -fsSL https://ollama.com/install.sh -o /tmp/ollama-install.sh')
+      log('  less /tmp/ollama-install.sh   # read what will run as root')
+      log('  sh /tmp/ollama-install.sh')
       return
     }
     log('Starting Ollama…')

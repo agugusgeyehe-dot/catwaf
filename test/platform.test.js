@@ -15,7 +15,9 @@ process.env.JWT_SECRET = 'p'.repeat(64)
 // `catwaf.example.com` dashboard fixture — a running CatWAF stopped serving
 // the site it was protecting. Must be set before caddy.js is first required,
 // since it reads the endpoint at module load.
-process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
+// Unconditional: an inherited CADDY_ADMIN_URL could point this suite's fixture
+// Caddyfile load at a live Caddy instance.
+process.env.CADDY_ADMIN_URL = 'http://127.0.0.1:19918'
 fs.mkdirSync(process.env.DB_DIR, { recursive: true })
 
 let pass = 0, fail = 0
@@ -244,9 +246,15 @@ const auth = require(path.join(ROOT, 'backend/middleware/auth.js'))
   check('reachability probe goes through the SSRF guard', /netGuard\.guardedFetch\(/.test(cfSource))
   const guardSource = fs.readFileSync(path.join(ROOT, 'backend/services/netGuard.js'), 'utf8')
   check('guarded outbound fetch has a timeout', /AbortSignal\.timeout/.test(guardSource))
-  check('guarded fetch does not blindly follow redirects', /redirect: 'manual'/.test(guardSource))
+  // Redirect handling is a manual hop loop: each hop is re-validated before
+  // connecting (protocol allowlist + address pin), never delegated to fetch.
+  check('guarded fetch does not blindly follow redirects', /MAX_REDIRECTS/.test(guardSource) && /res\.statusCode !== 307/.test(guardSource))
   check('guarded fetch caps redirect depth', /MAX_REDIRECTS/.test(guardSource))
   check('guarded fetch restricts protocols', /ALLOWED_PROTOCOLS/.test(guardSource))
+  // Anti-rebinding: connections must go through the pinned-lookup transport,
+  // which resolves once, validates, and hands only judged addresses to the
+  // socket — the hostname is never resolved twice.
+  check('outbound connections use DNS-pinned lookup', /makePinnedLookup/.test(guardSource) && /lookup: makePinnedLookup/.test(guardSource))
   const scannerSource = fs.readFileSync(path.join(ROOT, 'backend/routes/scanner.js'), 'utf8')
   check('origin scanner refuses non-public destinations', /reasonNotPublic\(/.test(scannerSource))
 

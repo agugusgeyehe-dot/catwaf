@@ -53,6 +53,19 @@ function stripAnsi(s) {
   return s.replace(/\x1b\[[0-9;]*m/g, '')
 }
 
+// Removes EVERY escape sequence and control character, not just SGR colour
+// codes: OSC/CSI/ESC-prefixed and bare C0/C1 bytes alike. Use this on any
+// string that came from outside the process (WAF log URIs, user agents,
+// audit fields) before printing it — a raw ESC byte from an attacker-planted
+// request is a terminal-hijacking primitive, and stripAnsi alone only
+// understands colour codes.
+function stripControl(s) {
+  return String(s ?? '')
+    // CSI + OSC + two-char escapes
+    .replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g, '')
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+}
+
 function padRight(text, width) {
   const len = stripAnsi(text).length
   return text + ' '.repeat(Math.max(0, width - len))
@@ -241,6 +254,6 @@ function liveView(renderFn, { intervalMs = 2000 } = {}) {
 
 module.exports = {
   colors, color, clearScreen, hideCursor, showCursor, moveTo, termSize,
-  center, padRight, stripAnsi, box, hr, SEVERITY_COLOR, renderFrame, menu, prompt, confirm,
+  center, padRight, stripAnsi, stripControl, box, hr, SEVERITY_COLOR, renderFrame, menu, prompt, confirm,
   waitForKey, liveView,
 }

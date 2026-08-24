@@ -203,7 +203,7 @@ Log in with the admin account you created in step 3.
 
 ## 5. First things to do
 
-1. **Set a real `JWT_SECRET`** if the wizard didn't. Copy `.env.example` to `.env` and set a random value (`openssl rand -hex 32`). Leaving it unset means the backend generates a random one at boot — safer than a hardcoded default, but every restart invalidates existing sessions.
+1. **Set a real `JWT_SECRET`** if the wizard didn't. Optional gates worth knowing about: `CATWAF_KERNEL_BANS=1` (kernel-level drops, see [protection.md](protection.md#kernel-level-drops-opt-in)) and `CATWAF_BACKUP_PASSPHRASE` (backup encryption). Both are documented in `.env.example`. Copy `.env.example` to `.env` and set a random value (`openssl rand -hex 32`). Leaving it unset means the backend generates a random one at boot — safer than a hardcoded default, but every restart invalidates existing sessions.
 2. **Set `CORS_ORIGIN`** to your real dashboard URL before exposing this to the internet.
 3. **Point Caddy at your actual application** — see [reverse-proxy.md](reverse-proxy.md).
 4. **Check the Security page** (`/security-score`) — it grades your actual current configuration, not a demo number, and tells you exactly what to fix.

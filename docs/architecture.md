@@ -62,6 +62,12 @@ Two opt-in features deliberately change that, and neither is on unless you turn 
 | Runtime enforcement (client reputation) | A `forward_auth` hop carrying request **headers** | Fails open — every error path answers allow |
 | Upload malware scanning | The request **body**, for the nominated upload paths only | Governed by `upload_scan.fail_open`, on by default |
 
+Both hops overwrite `X-Real-IP` / `X-CatWAF-Client-IP` with the real
+connection address before proxying to the backend — those header names are
+visitor-settable, and every ban, allowlist hit and challenge decision keys
+off them. The backend deliberately does not read `X-Forwarded-For` on these
+endpoints: its leftmost entry is attacker-chosen.
+
 Everything else keeps going straight from Caddy to your origin.
 
 What the backend does: serves the dashboard's API, persists WAF configuration, translates that configuration into real Coraza directives written into your Caddyfile, triggers a reload, and ingests Coraza's own audit log so the dashboard can show real traffic.
@@ -111,6 +117,13 @@ Routers are mounted at the app root, not under a shared `/api` prefix — each r
 | `secrets.js` | Key derivation for request signing. |
 | `logger.js` | Structured logging with per-subsystem children. |
 | `env.js` | `.env` loading, in one place, so scripts and the server agree. |
+| `configLock.js` | Cross-process mutex (lock file + revision CAS in SQLite) serializing every configuration writer; also owns atomic file replace. See [Configuration concurrency](#configuration-concurrency). |
+| `counters.js` | In-memory runtime counters (canary hits, alert deliveries) flushed to SQLite on a schedule so crash loss is bounded. |
+| `edgeBans.js` | Renders the newest active bans into the Caddyfile as a `remote_ip` + `abort` region. Content-hash short-circuit, allowlist conflicts excluded bidirectionally, failed reloads retried next tick. |
+| `alertDispatch.js` | Delivers alerts (spikes, new bans, engine changes) to webhooks/Telegram with cross-process cooldowns and refund-on-total-failure. |
+| `kernelBans.js` | Mirrors active bans into an nftables table for SYN-time drops. Heavily gated: setting + env + root + nft present + non-container. Manages only its own table. |
+| `siemStream.js` | JSONL export of blocked requests to data/siem.jsonl with size rotation and exactly-once rowid cursor; optional HTTP collector POSTs. |
+| `updateCheck.js` | Daily GitHub releases lookup for a newer CatWAF. Read-only, cached, prerelease-aware, "no releases yet" handled gracefully. |
 | `configTx.js` | The atomic-change primitive every WAF mutation goes through: snapshot state, back up the Caddyfile, mutate, validate, render, `caddy validate`, reload — and roll back state *and* file on any failure. `rules`, `modes`, `paranoia` and snapshot `restore` all use it, so rollback behaviour is implemented once. |
 | `rules.js` | CRS rule index. Discovers real CRS `.conf` files (env override, Go module cache, common system paths), parses id/msg/severity/paranoia-tag/targets, and falls back to rules observed in real traffic when no files are found. Also owns per-rule enable/disable. |
 | `events.js` | `explain` and `replay`. Joins a stored event with rule metadata, picks the *decisive* rule, and reports the real matched variable. Redacts sensitive query keys. |
@@ -140,6 +153,18 @@ The security-relevant property: **`extract.js` and the tool-call pass read only 
 ### Why services instead of logic in routes
 
 A route handler's job is: read the request, call a service function, shape the response. If you're writing an `if` statement that touches `state.WAF` or talks to Caddy from inside a route file, that logic almost certainly belongs in a service — it's very likely something another route needs too.
+
+### Configuration concurrency
+
+More than one process mutates configuration (API server, CLI, jobs). All writers
+serialize through `services/configLock.js`: `configTx.apply()` holds it across
+snapshot → mutate → persist → render → validate → reload, low-level Caddyfile patchers
+take it around their read-modify-write, and every write lands via temp-file + rename.
+State mutations that bypass configTx must use `state.updateWAF()`, which re-reads
+committed state under the lock first and persists with a revision bump
+(`waf__rev`) so other processes refresh instead of overwriting. New writers get both
+behaviors for free by using these two entry points — do not write the Caddyfile or the
+`waf` blob directly.
 
 ### Adding a new feature
 

@@ -56,6 +56,11 @@ function build(overrides = {}) {
   if (protocols.length !== 2 || !proxy.http2) server.push(`protocols ${protocols.join(' ')}`)
   if (proxy.http3) out.notes.push('HTTP/3 also needs UDP open on the same port as HTTPS.')
 
+  // ── Anti-DDoS (#75): emergency mode is enforced at classification time
+  // (enforce.js / challenge). Slowloris-resistant connection timeouts live
+  // in the `connections` group above (#18) — deliberately the single source
+  // of truth rather than a second knob set fighting over servers.timeouts.
+
   // #55 SNI half — refuse a TLS handshake whose SNI is not a known host.
   if (access.reject_unknown_host) {
     const hosts = sites.knownHosts()

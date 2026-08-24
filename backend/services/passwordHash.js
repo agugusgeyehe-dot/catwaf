@@ -6,6 +6,12 @@ const bcrypt = require('bcryptjs')
 const WORKER_PATH = path.join(__dirname, 'passwordHash.worker.js')
 const POOL_SIZE = Math.max(1, Math.min(2, (os.cpus()?.length || 1) - 1))
 const TASK_TIMEOUT_MS = 15000
+// bcryptjs runs synchronously inside the workers, so queued tasks are not
+// merely waiting — they are guaranteed CPU the moment a worker frees up.
+// Without this cap a flood of login attempts queues unboundedly and every
+// subsequent real login (including the operator's) times out. Overflow is
+// rejected fast instead of accepted and stalled.
+const MAX_PENDING_TASKS = 64
 
 let pool = null
 let nextWorker = 0
@@ -55,6 +61,10 @@ function run(message) {
         ? bcrypt.hashSync(message.password, message.cost)
         : bcrypt.compareSync(message.password, message.hash)
     )
+  }
+
+  if (pending.size >= MAX_PENDING_TASKS) {
+    return Promise.reject(new Error('password queue full'))
   }
 
   const worker = workers[nextWorker++ % workers.length]

@@ -69,14 +69,23 @@ router.get('/api/sensitive/scan', (req, res) => {
   {
     const results = []
     const risky = { php: 'high', config: 'critical', backup: 'critical', html: 'low' }
+    // The walk is synchronous — every directory level blocks the event loop
+    // that serves the WAF control plane — so it runs with hard bounds rather
+    // than trusting the webroot to be small. Symlinks are never followed
+    // (readdirSync dirent.isDirectory() is false for them), which also keeps
+    // a symlink farm from turning into an unbounded walk.
+    const MAX_DEPTH = 12
+    const MAX_RESULTS = 5000
 
-    function walk(dir, base = '') {
+    function walk(dir, base = '', depth = 0) {
+      if (depth > MAX_DEPTH || results.length >= MAX_RESULTS) return
       let entries
       try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
       for (const e of entries) {
+        if (results.length >= MAX_RESULTS) return
         const rel  = base + '/' + e.name
         const full = path.join(dir, e.name)
-        if (e.isDirectory()) { walk(full, rel); continue }
+        if (e.isDirectory()) { walk(full, rel, depth + 1); continue }
         const ext = path.extname(e.name).toLowerCase()
         let cat = 'other', risk = 'low'
         if (['.php', '.php3', '.php4', '.php5', '.phtml'].includes(ext)) cat = 'php'
@@ -93,7 +102,12 @@ router.get('/api/sensitive/scan', (req, res) => {
     }
     walk(WEBROOT)
     auditSvc.audit(req, 'sensitive.scan', `${results.length} files found`)
-    return res.json({ files: results, scanned_at: auditSvc.now(), configured: true })
+    return res.json({
+      files: results,
+      scanned_at: auditSvc.now(),
+      configured: true,
+      truncated: results.length >= MAX_RESULTS,
+    })
   }
 })
 

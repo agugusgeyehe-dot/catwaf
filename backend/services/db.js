@@ -11,10 +11,27 @@ let DB_PATH = process.env.DB_PATH || path.join(DB_DIR, 'catwaf.db')
 function openDb(dbPath) {
   const instance = new DatabaseSync(dbPath)
 
-  instance.exec(`
+  // busy_timeout MUST come first: journal_mode=WAL below needs a brief
+  // write lock, and on a fresh start several processes race to open the
+  // same database — without the timeout their PRAGMA fails outright with
+  // SQLITE_BUSY instead of waiting its turn.
+  function execWithRetry(statements) {
+    for (let attempt = 0; ; attempt++) {
+      try { instance.exec(statements); return }
+      catch (e) {
+        if ((e.code === 'ERR_SQLITE_ERROR' && e.errcode === 5) && attempt < 20) {
+          const until = Date.now() + 50
+          while (Date.now() < until) { /* brief spin: boot-time only */ }
+          continue
+        }
+        throw e
+      }
+    }
+  }
+  instance.exec('PRAGMA busy_timeout = 5000;')
+  execWithRetry(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
-    PRAGMA busy_timeout = 5000;
     PRAGMA temp_store = MEMORY;
   `)
 

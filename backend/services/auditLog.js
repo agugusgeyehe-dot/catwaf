@@ -37,6 +37,7 @@ const fs = require('fs')
 const path = require('path')
 
 const caddySvc = require('./caddy')
+const configLock = require('./configLock')
 const configTx = require('./configTx')
 
 const STATE_FILE = '.catwaf-audit-state.json'
@@ -205,6 +206,12 @@ function needsRotation(env = process.env) {
 // then validates and applies it through the same backup/validate/rollback
 // path every other configuration change uses.
 function repointCaddyfile(from, to) {
+  // The read-replace-validate-rename cycle must not interleave with another
+  // process patching the Caddyfile; the lock is re-entrant with configTx.
+  return configLock.withConfigLock(() => repointCaddyfileLocked(from, to))
+}
+
+function repointCaddyfileLocked(from, to) {
   let content
   try { content = caddySvc.readCaddyfile() } catch (e) { return { ok: false, error: e.message } }
 
@@ -256,13 +263,28 @@ function recover(basePath = caddySvc.baseAuditLogPath()) {
   const st = readState(basePath)
   if (!st.pending) return { recovered: false }
 
+  // State-file values are plain JSON beside the logs; treat them like any
+  // other path input rather than trusting them blindly.
   const { from, to } = st.pending
+  const contained = p => typeof p === 'string' && SAFE_PATH_RE.test(p)
+    && path.dirname(p) === path.dirname(activePath(basePath))
+  if ((from && !contained(from)) || (to && !contained(to))) {
+    writeState(basePath, { active: activePath(basePath) })
+    return { recovered: false, error: 'Ignoring a pending-rotation marker with out-of-tree paths.' }
+  }
+
   let caddyfileMentionsTo = false
   try { caddyfileMentionsTo = caddySvc.readCaddyfile().includes(`SecAuditLog ${to}`) } catch {}
 
   if (caddyfileMentionsTo) {
     // The repoint landed — complete it: the old file has no writer now.
-    if (from) drain(from)
+    const drained = from ? drain(from) : { ok: true }
+    if (drained && drained.error) {
+      // Could not ingest the retired log yet. Keep the pending marker so
+      // the next maintain() tries again; clearing it now would let prune()
+      // delete a log whose contents never reached the database.
+      return { recovered: false, outcome: 'deferred', error: drained.error }
+    }
     writeState(basePath, { active: to, rotatedAt: st.pending.startedAt || new Date().toISOString(), activeSince: new Date().toISOString() })
     return { recovered: true, outcome: 'completed' }
   }
@@ -284,11 +306,20 @@ function prune(env = process.env) {
   const cfg = config(env)
   const cutoff = Date.now() - cfg.retentionDays * 86400000
 
+  // A file still referenced by a pending rotation marker has not been
+  // confirmed ingested — deleting it would lose those audit events.
+  let pendingPaths = []
+  try {
+    const st = readState(base)
+    if (st.pending) pendingPaths = [st.pending.from, st.pending.to].filter(Boolean)
+  } catch {}
+
   const archives = listFiles(base).filter(f => f.path !== active)
   const deleted = []
   const failed = []
 
   archives.forEach((f, index) => {
+    if (pendingPaths.includes(f.path)) return
     const tooOld = f.mtime < cutoff
     // index is 0-based over archives only, so maxFiles counts archives kept
     // alongside the active log.
@@ -356,6 +387,24 @@ function rotate({ env = process.env, reason = 'manual' } = {}) {
   // The reload landed: `from` has no writer any more. Drain it completely
   // before it can ever become a pruning candidate.
   const drained = drain(from)
+  if (drained && drained.error) {
+    // Ingestion failed (e.g. database unavailable). Leave the pending
+    // marker in place — recover() on the next maintain() will re-drain the
+    // retired file — and skip pruning this cycle so the not-yet-ingested
+    // log cannot be deleted.
+    return {
+      ok: true,
+      from,
+      to,
+      reason,
+      ingested: 0,
+      ingestError: drained.error,
+      pendingRetry: true,
+      backup: repoint.backup || null,
+      pruned: [],
+      pruneFailures: [],
+    }
+  }
   writeState(base, { active: to, rotatedAt: new Date().toISOString(), activeSince: new Date().toISOString() })
 
   const pruned = prune(env)

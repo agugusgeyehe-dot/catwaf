@@ -42,7 +42,18 @@ function systemctl(args, timeout = 15000) {
 
 function pidAlive(pid) {
   if (!pid || !Number.isFinite(pid)) return false
-  try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' }
+  try { process.kill(pid, 0) } catch (e) { return e.code === 'EPERM' }
+  return true
+}
+
+// A pid file can outlive its process; the OS may then hand that PID to an
+// unrelated program, and a blind kill(pid) would signal *that*. Before any
+// signal, confirm /proc says the process is actually one of ours.
+function pidLooksLikeCatwaf(pid) {
+  try {
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+    return /node|catwaf|server\.js/.test(cmdline)
+  } catch { return false }
 }
 
 function readPid() {
@@ -255,6 +266,12 @@ async function stop() {
   }
 
   const pid = current.pid
+  // PID reuse guard: a stale catwaf.pid whose number now belongs to an
+  // unrelated process must not get signalled.
+  if (!pidLooksLikeCatwaf(pid)) {
+    clearPid()
+    return { ok: true, manager: 'process', detail: 'Stale pid file — the recorded process is gone or is not CatWAF; nothing was signalled.' }
+  }
   try { process.kill(pid, 'SIGTERM') } catch (e) {
     if (e.code === 'ESRCH') { clearPid(); return { ok: true, manager: 'process' } }
     return { ok: false, manager: 'process', error: e.message }

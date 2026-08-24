@@ -73,7 +73,8 @@ Three containers, matching how CatWAF already works outside Docker (see
 
 - **`backend`** — the Node API (`Dockerfile` at the repo root). Owns the
   SQLite database (`catwaf-data` volume) and writes WAF config changes into
-  the shared Caddyfile.
+  the shared Caddyfile. Runs as the image's unprivileged `node` user, not
+  root.
 - **`caddy`** (`docker/Caddy.Dockerfile`) — a Caddy binary built with the
   [Coraza module](https://github.com/corazawaf/coraza-caddy) baked in via
   `xcaddy`, serving the built dashboard SPA and running the actual WAF site
@@ -153,6 +154,24 @@ Both containers also run with `no-new-privileges:true`.
 If you expose the admin API more widely than the compose network, secure it
 yourself — Caddy's admin API is unauthenticated by design and assumes a
 trusted local interface.
+
+## Hardening
+
+`docker-compose.yml` applies a few conservative container-level measures on top
+of `no-new-privileges:true`:
+
+- **`cap_drop: ["ALL"]` on `backend`** — the API runs as the image's
+  unprivileged `node` user and listens on high ports (`:8000`) only, so it
+  needs no Linux capabilities and now runs with none.
+- **`cap_drop: ["ALL"]` + `cap_add: ["NET_BIND_SERVICE"]` on `caddy`** — Caddy
+  serves public traffic on `:80`/`:443`, and binding those privileged ports
+  requires `NET_BIND_SERVICE`; that single capability is granted back after
+  dropping all others. Caddy is deliberately *not* run read-only, since it
+  writes certificates and live config to its volumes.
+- **`tmpfs: [/tmp]` on `backend`** — `/tmp` becomes an in-memory mount instead
+  of persistent storage in the container's writable layer.
+- **JSON log rotation** on `backend` and `caddy` (`max-size: 10m`,
+  `max-file: 3`) so container logs cannot grow unbounded on the host.
 
 ## Data & config persistence
 

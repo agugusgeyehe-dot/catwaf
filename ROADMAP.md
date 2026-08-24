@@ -2,9 +2,35 @@
 
 CatWAF already does a lot — the goal from here isn't to add more features, it's to make the ones that exist solid enough that someone can trust them on a real site. Roughly in order:
 
+## Shipped in 1.1.0 (unreleased)
+
+- [x] **Security hardening pass** — client-IP spoofing on the enforcement plane closed
+      (Caddy now asserts the real address), `protect/test` made admin-only + dry-run,
+      malformed-cookie hang fixed, viewer-role secret leaks redacted, prototype-pollution
+      sinks stripped at every load/restore/persist, IPv6/Caddyfile-injection validation
+      tightened, plus a dozen smaller fixes (see CHANGELOG).
+- [x] **Architecture remediation** — cross-process config locking with revision CAS and
+      atomic Caddyfile writes; DNS-rebinding TOCTOU in outbound fetches closed via a
+      pinned-lookup transport; TRUST_PROXY_HOPS inferred from the deployment shape.
+- [x] **Enforcement tiers** — canary auto-ban (probe = instant escalating ban), edge ban
+      rendering into the Caddyfile (`remote_ip` + abort, permanent-first ordering),
+      opt-in nftables mirror for SYN-time drops.
+- [x] **Alert delivery (#74)** — spikes, new bans and engine changes delivered to
+      Slack/Discord/Telegram/webhooks; cross-process cooldowns; refund-on-total-failure.
+- [x] **Anti-DDoS (#75)** — under-attack mode: challenge everyone, 2-second verdict cache.
+- [x] **SIEM event stream (#76)** — JSONL to data/siem.jsonl (+ optional HTTP collector),
+      exactly-once cursor across restarts.
+- [x] **`catwaf update` (#77)** — GitHub release check, daily-cached, CLI command + job.
+- [x] **Encrypted backups + restore path** — AES-256-CBC artifacts, list/prune aware,
+      `catwaf backup restore` through the validate-and-rollback pipeline.
+- [x] **Attack Map rework** — flashing red points instead of large dark spheres;
+      hover tooltips with per-location totals across 24h / 5d / 7d / 30d.
+- [x] Trust-proxy inference, OpenAPI drift CI gate, Docker hardening
+      (`cap_drop`, tmpfs, log rotation), GeoIP age surfaced in diagnostics.
+
 ## Shipped in 1.0.2
 
-- [x] **The configuration and protection layer** — roughly 300 settings across 40 groups behind one declarative schema, and a client-reputation layer that decides about a *client* before the rule engine inspects the *request*. All of it opt-in.
+- [x] **The configuration and protection layer** — roughly 326 settings across 46 groups behind one declarative schema, and a client-reputation layer that decides about a *client* before the rule engine inspects the *request*. All of it opt-in.
 - [x] **Optional upload malware scanning** — a local ClamAV daemon, off by default, in the data path only for the upload paths you nominate.
 - [x] **Release hardening** — sign-out actually ends the session, the dashboard works from an address other than the one it was set up on, and a stopped CatWAF API no longer takes every protected site down with it.
 - [x] Fixed `guardedFetch` dropping the request body, which had silently emptied every outbound POST — including captcha verification, so an enabled challenge gate locked out legitimate visitors.

@@ -200,6 +200,15 @@ router.post('/api/catai/chat', chatLimiterPerDay, chatLimiterPerMin, async (req,
 router.post('/api/catai/apply', writeRequired, actionLimiter, (req, res) => {
   const { actionId, params } = req.body || {}
   if (typeof actionId !== 'string') return res.status(400).json({ detail: 'actionId is required' })
+  // Weakening actions keep the same human-in-the-loop rule here as in chat:
+  // the caller must explicitly acknowledge that this is a weakening change.
+  // The dashboard sends this flag from the Apply button; a stray or
+  // confused-deputy call cannot silently lower protection.
+  try {
+    if (actions.directionOf(actionId, params || {}) === actions.DIRECTION.WEAKEN && req.body?.confirm_weaken !== true) {
+      return res.status(400).json({ detail: 'This change weakens protection — it needs explicit confirmation.', code: 'WEAKEN_CONFIRMATION_REQUIRED' })
+    }
+  } catch { /* unknown actions fail below with a clearer error */ }
   const applied = actions.apply(actionId, params || {}, req)
   if (!applied.ok) return res.status(400).json({ detail: applied.error })
   const undoId = undo.record({ actionId, params: params || {}, prev: applied.prev, user: req.user.username })

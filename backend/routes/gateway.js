@@ -26,6 +26,7 @@
 
 const express = require('express')
 const crypto = require('crypto')
+const rateLimit = require('express-rate-limit')
 
 const router = express.Router()
 
@@ -40,6 +41,32 @@ const { ipCoveredBy, normalizeClientIp } = require('../services/sanitize')
 
 const log = logger.child('gateway')
 
+// The challenge endpoints sit before the shared /api limiter (they have to
+// be reachable pre-auth), so they carry their own. Without one, an anonymous
+// flood of challenge pages pays SVG+HTML generation and grows server state
+// per request.
+const clientKey = req => normalizeClientIp(req.ip || '') || 'unknown'
+const challengeGetLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: clientKey,
+  message: { detail: 'Too many requests — slow down.' },
+})
+const challengeVerifyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: clientKey,
+  message: { detail: 'Too many verification attempts — slow down.' },
+})
+
+function safeIsVerified(req) {
+  try { return challenge.isVerified(req) } catch { return false }
+}
+
 function timingSafeEquals(a, b) {
   const bufA = Buffer.from(String(a || ''))
   const bufB = Buffer.from(String(b || ''))
@@ -48,10 +75,13 @@ function timingSafeEquals(a, b) {
 }
 
 function forwardedIp(req) {
+  // These two headers are only trusted because the rendered Caddyfile
+  // overwrites them with `{http.request.remote.host}` on every hop into
+  // CatWAF (enforce, challenge, upload gate). Sniffing X-Forwarded-For here
+  // was removed deliberately: its leftmost entry is attacker-chosen, and a
+  // visitor could rotate it per request to defeat bans and attempt counters.
   const real = req.headers['x-catwaf-client-ip'] || req.headers['x-real-ip']
   if (real) return normalizeClientIp(String(real).split(',')[0].trim())
-  const xff = req.headers['x-forwarded-for']
-  if (xff) return normalizeClientIp(String(xff).split(',')[0].trim())
   return normalizeClientIp(req.ip || '')
 }
 
@@ -103,7 +133,7 @@ router.all('/api/enforce', async (req, res) => {
     return res.status(access.blocked_status_code).json({ detail: 'Forbidden' })
   }
 
-  if (verdict.action === 'challenge' && !challenge.isVerified(req)) {
+  if (verdict.action === 'challenge' && !safeIsVerified(req)) {
     res.set('X-CatWAF-Verdict', 'challenge')
     return res.redirect(302, `/catwaf-challenge?return_to=${encodeURIComponent(uri)}`)
   }
@@ -217,8 +247,16 @@ router.all('/api/upload-gate', async (req, res) => {
     }
     log.warn('Forwarding an upload that was too large to scan', { limit: cfg.max_scan_bytes, ip })
   } else {
-    verdict = await clamav.scanBuffer(body, cfg, cfg.timeout_ms)
-    scanned = true
+    // This handler is async: an uncaught rejection here would never answer
+    // Caddy, so the visitor's upload hangs until timeout. Contain it.
+    try {
+      verdict = await clamav.scanBuffer(body, cfg, cfg.timeout_ms)
+      scanned = true
+    } catch (e) {
+      log.error('Upload scan threw', { error: e.message, ip })
+      verdict = { clean: null, virus: null, error: e.message }
+      scanned = true
+    }
   }
 
   if (scanned && verdict.clean === false) {
@@ -302,10 +340,33 @@ function isSecureRequest(req) {
   return req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https'
 }
 
-router.get('/catwaf-challenge', (req, res) => {
+// The global helmet policy (default-src 'none', script-src 'self') blocks
+// the challenge page's own inline proof-of-work script and every provider
+// widget, so the page would render but never complete — a challenged visitor
+// loops forever. This page-specific policy allows exactly what the page
+// needs and nothing more; it is only sent with challenge HTML.
+function challengeCsp(cfg) {
+  const sources = require('../services/challenge/providers').cspSources(cfg.provider)
+  const list = () => (sources.length ? sources.join(' ') : "'none'")
+  return [
+    "default-src 'none'",
+    `script-src 'self' 'unsafe-inline'${sources.length ? ' ' + sources.join(' ') : ''}`,
+    `frame-src ${list()}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    `connect-src 'self'${sources.length ? ' ' + sources.join(' ') : ''}`,
+    "font-src 'self' data:",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+  ].join('; ')
+}
+
+router.get('/catwaf-challenge', challengeGetLimiter, (req, res) => {
   const cfg = settings.get('challenge')
   if (cfg.mode === 'off') return res.redirect(302, challenge.safeReturnTo(req.query.return_to))
-  if (challenge.isVerified(req)) return res.redirect(302, challenge.safeReturnTo(req.query.return_to))
+  if (safeIsVerified(req)) return res.redirect(302, challenge.safeReturnTo(req.query.return_to))
 
   const issued = challenge.issue({
     ip: forwardedIp(req),
@@ -314,17 +375,18 @@ router.get('/catwaf-challenge', (req, res) => {
   })
   res.set('Cache-Control', 'no-store, private')
   res.set('X-Robots-Tag', 'noindex, nofollow')
+  res.set('Content-Security-Policy', challengeCsp(cfg))
   res.type('html').status(503).send(issued.html)
 })
 
-router.get('/catwaf-challenge/status', (req, res) => {
+router.get('/catwaf-challenge/status', challengeGetLimiter, (req, res) => {
   res.set('Cache-Control', 'no-store').json({
-    verified: challenge.isVerified(req),
+    verified: safeIsVerified(req),
     mode: settings.get('challenge').mode,
   })
 })
 
-router.post('/catwaf-challenge/verify', challengeBody, async (req, res) => {
+router.post('/catwaf-challenge/verify', challengeVerifyLimiter, challengeBody, async (req, res) => {
   const cfg = settings.get('challenge')
   if (cfg.mode === 'off') return res.redirect(302, '/')
 
@@ -356,6 +418,7 @@ router.post('/catwaf-challenge/verify', challengeBody, async (req, res) => {
       seconds: 3600,
       reason: `Failed the challenge ${cfg.max_attempts} times.`,
     })
+    res.set('Content-Security-Policy', challengeCsp(cfg))
     return res.status(429).type('html').send(
       require('../services/challenge/page').build({
         mode: cfg.mode, provider: cfg.provider, siteKey: cfg.site_key,
@@ -366,6 +429,7 @@ router.post('/catwaf-challenge/verify', challengeBody, async (req, res) => {
 
   if (!result.ok) {
     const reissued = challenge.issue({ ip, userAgent: req.headers['user-agent'], returnTo, error: result.error })
+    res.set('Content-Security-Policy', challengeCsp(cfg))
     return res.status(403).type('html').send(reissued.html)
   }
 

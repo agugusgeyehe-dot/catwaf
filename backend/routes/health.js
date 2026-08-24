@@ -13,6 +13,15 @@ const { version: pkgVersion } = require('../../package.json')
 router.get('/api/diagnostics', async (req, res) => {
   const checks = {}
 
+  {
+    const geoAge = require('../services/geoip').available().database_age_days
+    checks.geoip_data_age = geoAge == null
+      ? { ok: null, detail: 'bundled database age unknown' }
+      : geoAge > 180
+        ? { ok: false, detail: `the bundled GeoIP database is ~${geoAge} days old — country blocking accuracy degrades over time. Update the geoip-lite package, or set GEODATADIR to a fresher dataset directory.` }
+        : { ok: true, detail: `~${geoAge} days old` }
+  }
+
   checks.caddy = caddySvc.isCaddyRunning()
     ? { ok: true, detail: 'running' }
     : { ok: false, detail: 'not running' }
@@ -59,13 +68,21 @@ router.get('/api/diagnostics', async (req, res) => {
 })
 
 router.get('/api/diagnostics/export', (req, res) => {
+  // This dump contains everything — webhook URLs and other secret-named
+  // values in waf_state, plus the operator activity in the audit log. It is
+  // admin-only, and even for admins secret-shaped fields are redacted: the
+  // export is for debugging config, not for carrying credentials around.
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Admin role required.' })
+  }
+  const snapshots = require('../services/snapshots')
   const lint = (() => { try { return lintSvc.lintConfig() } catch { return null } })()
   res.json({
     generated_at: auditSvc.now(),
     catwaf_version: pkgVersion,
     edition: 'free',
     node_version: process.version,
-    waf_state: state.WAF,
+    waf_state: snapshots.redactSecrets(state.WAF),
     rule_categories: state.RULE_CATEGORIES,
     lint_result: lint,
     recent_audit: auditSvc.getAuditLogs(50),

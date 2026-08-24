@@ -269,7 +269,11 @@ ensure_node() {
     apt)
       # NodeSource's setup script is fetched to a file and executed explicitly.
       # It is never piped into a shell, so it can be inspected on failure, and
-      # it is never `eval`ed.
+      # it is never `eval`ed. The Node packages themselves are installed from
+      # the NodeSource apt/rpm repository, whose metadata is GPG-signed — the
+      # distro package manager verifies those signatures on every install, so
+      # the actual Node binary is verified by the strongest mechanism upstream
+      # offers. Only this one-time bootstrap script rides on TLS trust alone.
       local script="$TMP_DIR/nodesource_setup.sh"
       curl -fsSL --proto '=https' --tlsv1.2 \
         "https://deb.nodesource.com/setup_${MIN_NODE_MAJOR}.x" -o "$script" \
@@ -533,7 +537,21 @@ maybe_install_ai() {
     info "CatWAF Full runs fine without it. Install later: https://ollama.com/download"
     return
   fi
-  if ! sh "$script" >/dev/null 2>&1; then
+  # Supply-chain: Ollama publishes no signed checksum for its install script.
+  # If the operator supplies CATWAF_OLLAMA_INSTALL_SHA256 (e.g. recorded from
+  # a previous reviewed install, trust-on-first-use), enforce it. Either way
+  # the script is saved to disk first — never piped into a shell — and runs
+  # with output VISIBLE so what it does is on the record.
+  if [ -n "${CATWAF_OLLAMA_INSTALL_SHA256:-}" ]; then
+    local actual; actual="$(sha256sum "$script" | awk '{print $1}')"
+    if [ "$actual" != "$CATWAF_OLLAMA_INSTALL_SHA256" ]; then
+      warn "Ollama installer hash mismatch (expected $CATWAF_OLLAMA_INSTALL_SHA256, got $actual) — skipping CatAI."
+      info "Review $script manually or update CATWAF_OLLAMA_INSTALL_SHA256."
+      return
+    fi
+    ok "Ollama installer hash matches the recorded pin"
+  fi
+  if ! sh "$script"; then
     warn "Ollama installation failed — skipping CatAI. CatWAF Full still works."
     return
   fi

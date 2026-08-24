@@ -87,6 +87,18 @@ is kept for familiarity. Do not wrap them in `rate()`.
 | `catwaf_active_bans` | `source` (plus `source="all"`) | Currently banned addresses, by the feature that banned them |
 | `catwaf_list_entries` | `list` | Sizes of the IP blocklist, allowlist, geo rules, custom rules and disabled rules |
 
+### Enforcement tiers
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `catwaf_edge_bans_active` | — | Ban targets currently rendered into the Caddyfile edge region (0 when edge enforcement is off) |
+| `catwaf_kernel_bans_active` | — | Entries mirrored into the nftables `catwaf_edge` sets (0 when disabled or never applied) |
+| `catwaf_canary_hits_total` | — | Counter: requests that touched a canary path and were banned |
+| `catwaf_alerts_delivered_total` | `kind` = `spike`, `new_ban`, `engine_change` | Counter: alert deliveries attempted per kind |
+
+`_active` gauges are scraped from live state; the `_total` counters survive
+restarts (flushed to SQLite every minute).
+
 ### Configuration health
 
 These two are the reason to scrape CatWAF even if you already graph your web

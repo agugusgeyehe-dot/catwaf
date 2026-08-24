@@ -26,12 +26,15 @@ const log = logger.child('clamav')
 
 // Where the distro packages put clamd's socket. Checked in order when the
 // operator has not named one explicitly, so the common install just works.
+// /run and /var/run are root-owned: a socket there can only be planted by
+// root. A world-writable directory like /tmp is deliberately NOT probed —
+// any local user could plant a listener there, receive full upload contents
+// over INSTREAM (exfiltration) and answer forged "stream: OK" verdicts.
 const SOCKET_CANDIDATES = [
   '/run/clamav/clamd.ctl',
   '/var/run/clamav/clamd.ctl',
   '/run/clamav/clamd.sock',
   '/var/run/clamav/clamd.sock',
-  '/tmp/clamd.socket',
 ]
 
 // clamd's INSTREAM chunk header is a 4-byte big-endian length. 64 KiB keeps
@@ -73,6 +76,9 @@ function connect(target, timeoutMs) {
 function readReply(socket, timeoutMs) {
   return new Promise((resolve, reject) => {
     let buf = ''
+    // Every legitimate clamd reply is a short single line; a hostile or
+    // misbehaving endpoint must not be able to balloon memory here.
+    const MAX_REPLY_BYTES = 1 << 20
     const done = (err, value) => {
       clearTimeout(timer)
       socket.removeAllListeners('data')
@@ -84,6 +90,7 @@ function readReply(socket, timeoutMs) {
     const timer = setTimeout(() => done(new Error('clamd did not respond in time')), timeoutMs)
     socket.on('data', chunk => {
       buf += chunk.toString('utf8')
+      if (buf.length > MAX_REPLY_BYTES) return done(new Error('clamd reply exceeded the size limit'))
       if (buf.includes('\0')) done(null, buf.split('\0')[0].trim())
     })
     socket.on('error', err => done(err))

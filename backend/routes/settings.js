@@ -16,6 +16,7 @@ const caddySvc = require('../services/caddy')
 const caddyModules = require('../services/caddyModules')
 const wellknown = require('../services/wellknown')
 const bcrypt = require('bcryptjs')
+const sanitizeSvc = require('../services/sanitize')
 const { authRequired, writeRequired, BCRYPT_COST } = require('../middleware/auth')
 
 function bad(res, detail, code = 400) { return res.status(code).json({ detail }) }
@@ -133,6 +134,15 @@ router.post('/api/config/preview', authRequired, writeRequired, (req, res) => {
   const { waf = null, settings: groups = null } = req.body || {}
   if (!waf && !groups) return bad(res, 'Supply a "waf" object, a "settings" object, or both.')
 
+  // Same validation a real apply would run — preview must not be a way to
+  // render values that could never be saved.
+  let wafPatch = null
+  if (waf) {
+    const check = sanitizeSvc.validateWafState(waf)
+    if (!check.valid) return bad(res, check.errors.join('; '))
+    wafPatch = check.sanitized
+  }
+
   for (const [group, patch] of Object.entries(groups || {})) {
     if (!settings.isGroup(group)) return bad(res, `Unknown settings group "${group}"`)
     const check = settings.validate(group, patch)
@@ -142,14 +152,14 @@ router.post('/api/config/preview', authRequired, writeRequired, (req, res) => {
   const result = previewSvc.preview({
     label: 'config',
     mutate: (s) => {
-      for (const [key, value] of Object.entries(waf || {})) {
+      for (const [key, value] of Object.entries(wafPatch || {})) {
         if (Object.hasOwn(s.WAF, key)) s.WAF[key] = value
       }
       for (const [group, patch] of Object.entries(groups || {})) {
         const r = settings.set(group, patch)
         if (!r.ok) throw new Error(`${group}: ${r.error}`)
       }
-      return { waf: Object.keys(waf || {}), settings: Object.keys(groups || {}) }
+      return { waf: Object.keys(wafPatch || {}), settings: Object.keys(groups || {}) }
     },
   })
   if (!result.ok) return bad(res, result.error)

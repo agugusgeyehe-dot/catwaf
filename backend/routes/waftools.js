@@ -16,15 +16,18 @@ const state = require('../services/state')
 
 function bad(res, detail, code = 400) { return res.status(code).json({ detail }) }
 
-router.get('/api/events/:id/explain', authRequired, (req, res) => {
-  const result = eventsSvc.explain({ id: req.params.id })
-  if (!result.ok) return bad(res, result.detail || result.error, 404)
-  res.json(result)
-})
-
+// The literal route must be registered BEFORE the :id route, or every
+// /api/events/latest/explain request matches :id="latest", fails the event
+// lookup, and 404s — leaving this branch unreachable over HTTP.
 router.get('/api/events/latest/explain', authRequired, (req, res) => {
   const result = eventsSvc.explain({ last: true })
   if (!result.ok) return bad(res, result.error, 404)
+  res.json(result)
+})
+
+router.get('/api/events/:id/explain', authRequired, (req, res) => {
+  const result = eventsSvc.explain({ id: req.params.id })
+  if (!result.ok) return bad(res, result.detail || result.error, 404)
   res.json(result)
 })
 
@@ -85,13 +88,28 @@ router.get('/api/audit/summary', authRequired, (req, res) => {
   })
 })
 
+// Each simulate() spins up a throwaway Caddy+Coraza sandbox — real CPU,
+// fds and temp disk. Cap how many run at once so a write-enabled session
+// looping this endpoint cannot exhaust the box.
+let simulationsInFlight = 0
+const MAX_CONCURRENT_SIMULATIONS = 2
+
 router.post('/api/simulate', authRequired, writeRequired, async (req, res) => {
   const { url, request } = req.body || {}
   if (url != null && typeof url !== 'string') return bad(res, 'url must be a string.')
   if (request != null && typeof request !== 'string') return bad(res, 'request must be a raw HTTP request string.')
   if (!url && !request) return bad(res, 'Provide "url" or "request".')
 
-  const result = await simulateSvc.simulate({ url: url || null, requestText: request != null ? request : null })
+  if (simulationsInFlight >= MAX_CONCURRENT_SIMULATIONS) {
+    return bad(res, 'A simulation is already running — try again in a moment.', 503)
+  }
+  simulationsInFlight++
+  let result
+  try {
+    result = await simulateSvc.simulate({ url: url || null, requestText: request != null ? request : null })
+  } finally {
+    simulationsInFlight--
+  }
   if (!result.ok) return bad(res, result.error, result.unavailable ? 503 : 400)
   auditSvc.audit(req, 'waf.simulate', '', { blocked: result.blocked })
   res.json(result)

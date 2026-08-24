@@ -327,14 +327,18 @@ function getLatest({ blockedOnly = false } = {}) {
 const WINDOW_RE = /^(\d+)\s*([smhdw])$/i
 const WINDOW_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000, w: 604800000 }
 
-function parseWindow(spec, fallbackMs = 24 * 3600000) {
+function parseWindow(spec, fallbackMs = 24 * 3600000, maxMs = 366 * 24 * 3600000) {
   if (spec == null || spec === '') return fallbackMs
-  if (typeof spec === 'number' && Number.isFinite(spec)) return spec
+  if (typeof spec === 'number' && Number.isFinite(spec)) spec = String(spec)
   const m = WINDOW_RE.exec(String(spec).trim())
   if (!m) return null
   const n = Number(m[1])
   if (!Number.isFinite(n) || n <= 0 || n > 100000) return null
-  return n * WINDOW_MS[m[2].toLowerCase()]
+  const ms = n * WINDOW_MS[m[2].toLowerCase()]
+  // A ceiling keeps "?window=100000w" from turning every analytics query
+  // into a whole-table scan; one year is far beyond any useful view.
+  if (!Number.isFinite(ms) || ms <= 0 || ms > maxMs) return null
+  return ms
 }
 
 function query({ sinceMs = 24 * 3600000, attackType = null, severity = null, action = null, limit = 100, offset = 0 } = {}) {

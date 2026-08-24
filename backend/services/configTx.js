@@ -4,6 +4,7 @@ const { execFileSync } = require('child_process')
 
 const state = require('./state')
 const caddySvc = require('./caddy')
+const configLock = require('./configLock')
 const auditSvc = require('./audit')
 const db = require('./db')
 
@@ -65,17 +66,37 @@ function snapshotWaf() {
   }))
 }
 
+// Keys that must never be copied back onto a live object: a persisted
+// snapshot carrying an own "__proto__" property would survive the JSON
+// round-trip above, and Object.assign's [[Set]] semantics would turn it into
+// an actual prototype change on state.WAF.
+const UNSAFE_RESTORE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+function safeAssign(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (UNSAFE_RESTORE_KEYS.has(key)) continue
+    target[key] = value
+  }
+  return target
+}
+
 function restoreWaf(snap) {
   for (const key of Object.keys(state.WAF)) delete state.WAF[key]
-  Object.assign(state.WAF, snap.WAF)
+  safeAssign(state.WAF, snap.WAF)
   for (const key of Object.keys(state.RULE_CATEGORIES)) delete state.RULE_CATEGORIES[key]
-  Object.assign(state.RULE_CATEGORIES, snap.RULE_CATEGORIES)
+  safeAssign(state.RULE_CATEGORIES, snap.RULE_CATEGORIES)
   if (snap.SETTINGS) state.settings.restore(snap.SETTINGS)
   db.setState('waf', state.WAF)
   db.setState('rule_categories', state.RULE_CATEGORIES)
 }
 
 function apply({ label, req = null, mutate, validate = null, reload = true }) {
+  // One writer at a time, across processes: snapshot → mutate → persist →
+  // render → validate → reload must never interleave with a CLI invocation
+  // or a scheduled job doing the same. patchWAFCaddyfile takes the same
+  // lock internally (re-entrant here), and atomicWriteFileSync guarantees a
+  // reader on another process never sees a torn Caddyfile.
+  return configLock.withConfigLock(() => {
   // Coraza opens SecAuditLog when the config is provisioned, so the audit
   // log has to exist before `caddy validate` runs — otherwise every WAF
   // change fails on a clean install. Idempotent.
@@ -99,7 +120,7 @@ function apply({ label, req = null, mutate, validate = null, reload = true }) {
   const rollback = () => {
     restoreWaf(before)
     try {
-      if (previousCaddyfile !== null) fs.writeFileSync(caddyfilePath, previousCaddyfile, 'utf8')
+      if (previousCaddyfile !== null) configLock.atomicWriteFileSync(caddyfilePath, previousCaddyfile, { mode: 0o644 })
       else if (fs.existsSync(caddyfilePath)) fs.unlinkSync(caddyfilePath)
     } catch {}
   }
@@ -179,14 +200,15 @@ function apply({ label, req = null, mutate, validate = null, reload = true }) {
     ...(mutateResult && typeof mutateResult === 'object' ? { detail: mutateResult } : {}),
   })
 
-  return {
-    ok: true,
-    reloaded,
-    reloadError,
-    backup,
-    validationSkipped: validation.skipped || null,
-    result: mutateResult,
-  }
+    return {
+      ok: true,
+      reloaded,
+      reloadError,
+      backup,
+      validationSkipped: validation.skipped || null,
+      result: mutateResult,
+    }
+  })
 }
 
 module.exports = {

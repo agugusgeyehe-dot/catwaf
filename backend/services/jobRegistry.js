@@ -42,6 +42,74 @@ function registerAll() {
     fn: () => require('./intel/lists').refreshAll(),
   })
 
+  // ── Edge ban enforcement ──
+  jobs.register('edge_bans.refresh', {
+    label: 'Refresh edge ban rules',
+    description: 'Renders the newest active bans into the Caddyfile so banned addresses are dropped by Caddy itself.',
+    intervalSec: () => settings.get('edge_bans').refresh_seconds,
+    runOnStart: true,
+    reloadAfter: false,
+    isEnabled: () => settings.get('edge_bans').enabled,
+    fn: () => require('./edgeBans').refresh(),
+  })
+
+  // ── Kernel-level drops (opt-in) ──
+  jobs.register('kernel_bans.refresh', {
+    label: 'Sync kernel ban sets',
+    description: 'Mirrors active bans into the catwaf_edge nftables set for drops at SYN.',
+    intervalSec: 60,
+    runOnStart: true,
+    reloadAfter: false,
+    isEnabled: () => settings.get('kernel_bans').enabled && process.env.CATWAF_KERNEL_BANS === '1',
+    fn: () => require('./kernelBans').refresh(),
+  })
+
+  // ── SIEM event stream (#76) ──
+  jobs.register('siem.export', {
+    label: 'Export SIEM event batch',
+    description: 'Appends recent requests to data/siem.jsonl and POSTs to the configured collector.',
+    intervalSec: 60,
+    reloadAfter: false,
+    isEnabled: () => settings.get('siem').enabled,
+    fn: () => require('./siemStream').poll(),
+  })
+
+  // Runtime counter flush (canary hits, alert deliveries…).
+  jobs.register('counters.flush', {
+    label: 'Flush runtime counters',
+    description: 'Persists in-memory counters so a crash loses at most a minute of them.',
+    intervalSec: 60,
+    reloadAfter: false,
+    fn: () => require('./counters').flush(),
+  })
+
+  // ── Update check (#77) ──
+  jobs.register('update.check', {
+    label: 'Check for CatWAF updates',
+    description: 'Asks GitHub whether a newer release exists. Read-only — never auto-installs.',
+    intervalSec: 24 * 3600,
+    runOnStart: true,
+    reloadAfter: false,
+    fn: async () => {
+      const r = await require('./updateCheck').check()
+      return { latestVersion: r.latestVersion || null, upToDate: r.upToDate, error: r.error || null }
+    },
+  })
+
+  // ── Alert delivery (#74) ──
+  jobs.register('alerts.evaluate', {
+    label: 'Evaluate alert triggers',
+    description: 'Checks blocked-request volume against the spike threshold and announces engine changes.',
+    intervalSec: 60,
+    reloadAfter: false,
+    isEnabled: () => settings.get('alert_dispatch').enabled,
+    fn: async () => {
+      const dispatch = require('./alertDispatch')
+      const results = { spike: await dispatch.evaluateSpike(), engine: dispatch.checkEngineChange() }
+      return results
+    },
+  })
+
   // ── Scheduled backups (#45) ──
   jobs.register('backups.run', {
     label: 'Scheduled backup',

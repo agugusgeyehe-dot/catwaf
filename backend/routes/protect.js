@@ -93,8 +93,22 @@ router.post('/api/bans/clear', authRequired, writeRequired, (req, res) => {
 // ─── Enforcement pipeline ───────────────────────────────────────────────
 
 router.get('/api/protect/status', authRequired, (req, res) => {
+  const edgeCfg = settings.get('edge_bans')
+  let edge = null
+  if (edgeCfg.enabled) {
+    const targets = (() => { try { return require('../services/edgeBans').collectTargets({ maxRules: edgeCfg.max_rules, includeCidrs: edgeCfg.include_cidrs }) } catch { return [] } })()
+    edge = { enabled: true, rendered: targets.length, max_rules: edgeCfg.max_rules, refresh_seconds: edgeCfg.refresh_seconds }
+  } else {
+    edge = { enabled: false }
+  }
+  const kernel = (() => { try { return require('../services/kernelBans').status() } catch { return null } })()
   res.json({
     ...enforce.status(),
+    ddos: settings.get('ddos'),
+    canary: settings.get('canary'),
+    edge_bans: edge,
+    kernel_bans: kernel ? { enabled: kernel.enabled, env_enabled: kernel.env_enabled, preflight_ok: kernel.preflight.ok, problems: kernel.preflight.problems, entries: kernel.last_applied_entries } : null,
+    alerts_delivery: require('../services/alertDispatch').status(),
     challenge: challenge.status(),
     community_lists: lists.summary(),
   })
@@ -102,12 +116,16 @@ router.get('/api/protect/status', authRequired, (req, res) => {
 
 // "Why would this address be treated the way it is?" — runs the real
 // pipeline against a supplied address without it having to visit the site.
-router.post('/api/protect/test', authRequired, async (req, res) => {
+// Admin-only and dry-run: classify() is invoked with dryRun so a test can
+// never write a real ban or make live probe connections against an
+// operator-chosen address (which, with a CIDR supplied, could otherwise
+// block every visitor — or the admin's own address).
+router.post('/api/protect/test', authRequired, writeRequired, async (req, res) => {
   const { ip, uri = '/', user_agent = '', headers: rawHeaders = [] } = req.body || {}
   if (!isValidIpOrCidr(String(ip || '').trim())) return bad(res, 'ip must be a valid IP address')
   const headers = Array.isArray(rawHeaders) ? rawHeaders.filter(h => typeof h === 'string').slice(0, 100) : []
   try {
-    const verdict = await enforce.classify({ ip, uri, userAgent: user_agent, headers })
+    const verdict = await enforce.classify({ ip, uri, userAgent: user_agent, headers }, { dryRun: true })
     const fingerprint = toolsFingerprint.fingerprint({
       userAgent: user_agent,
       headers,

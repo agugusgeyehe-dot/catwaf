@@ -1,6 +1,7 @@
 
 const net = require('net')
 const dns = require('dns').promises
+const dnsCb = require('dns')
 
 const V4_BLOCKED = [
   ['0.0.0.0', 8],
@@ -64,6 +65,12 @@ const V6_BLOCKED = [
   ['ff00::', 8],
 ]
 
+// ::ffff:<hex>:<hex> is an IPv4-mapped address in hex dress (::ffff:a00:1 IS
+// 10.0.0.1). Only the dotted-tail spelling was unwrapped below, so the hex
+// spelling passed every reserved-range check and reached private hosts.
+const MAPPED_V4_DOTTED = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i
+const MAPPED_V4_HEX = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i
+
 function reasonNotPublic(ip) {
   const family = net.isIP(ip)
   if (family === 0) return 'not a valid IP address'
@@ -73,6 +80,17 @@ function reasonNotPublic(ip) {
       if (v4InBlock(ip, network, bits)) return `${ip} is in the reserved range ${network}/${bits}`
     }
     return null
+  }
+
+  // An IPv4-mapped literal is judged by its embedded IPv4 address, whatever
+  // spelling the tail arrived in.
+  const mappedDotted = MAPPED_V4_DOTTED.exec(ip)
+  if (mappedDotted) return reasonNotPublic(mappedDotted[1])
+  const mappedHex = MAPPED_V4_HEX.exec(ip)
+  if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16)
+    const lo = parseInt(mappedHex[2], 16)
+    return reasonNotPublic(`${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`)
   }
 
   const embedded = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip)
@@ -121,9 +139,185 @@ async function resolvePublicAddresses(hostname) {
 const MAX_REDIRECTS = 3
 const ALLOWED_PROTOCOLS = new Set(['https:', 'http:'])
 
-async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers = {}, body = null } = {}) {
+const http = require('http')
+const https = require('https')
+const zlib = require('zlib')
+
+// ── Anti-rebinding transport ────────────────────────────────────────────
+//
+// The previous implementation validated DNS and then handed the *hostname*
+// to fetch(), which resolved it a second time inside undici — a TOCTOU: DNS
+// answering the validation with a public address and the connection with
+// 127.0.0.1 would win both halves. The fix is to do ONE resolution through
+// our own `lookup` function, validate what came back, and hand only
+// validated addresses to the socket. node:http/https call `lookup` exactly
+// once per connection, so the validated address is byte-for-byte the
+// connected address. TLS SNI and the Host header stay pointed at the
+// original hostname.
+
+// Short-lived pin so every hop of a redirect chain re-uses one verdict for
+// the same hostname instead of re-resolving (and re-attacking) it.
+const PIN_TTL_MS = 10_000
+const pinnedCache = new Map() // `${mode}|${hostname}` → { addrs, at }
+
+function resolvePinned(hostname, { allowLoopback }) {
+  const key = `${allowLoopback ? 'open' : 'strict'}|${hostname}`
+  const hit = pinnedCache.get(key)
+  if (hit && Date.now() - hit.at < PIN_TTL_MS) return Promise.resolve(hit.addrs)
+
+  const promise = new Promise((resolve, reject) => {
+    // Callback-form lookup (dnsCb, not the promises API) — this function is
+    // consumed by net.connect's `lookup` option.
+    dnsCb.lookup(hostname, { all: true, verbatim: true }, (err, addrs) => {
+      if (err || !addrs || !addrs.length) {
+        return reject(Object.assign(new Error(`Could not resolve ${hostname}.`), { status: 400 }))
+      }
+      if (!allowLoopback) {
+        for (const { address } of addrs) {
+          const why = reasonNotPublic(address)
+          if (why) {
+            return reject(Object.assign(new Error(`Refusing to connect: ${hostname} resolves to ${address}, which is not publicly routable.`), { status: 400 }))
+          }
+        }
+      }
+      resolve(addrs.map(a => ({ address: a.address, family: a.family })))
+    })
+  })
+  promise.then(
+    addrs => pinnedCache.set(key, { addrs, at: Date.now() }),
+    () => {},
+  )
+  return promise
+}
+
+function makePinnedLookup({ allowLoopback }) {
+  return function pinnedLookup(hostname, options, callback) {
+    resolvePinned(hostname, { allowLoopback }).then(
+      (addrs) => {
+        // dns.lookup({all:true}) returns numeric families (4/6), never the
+        // 'IPv6' string — labeling an IPv6 address as family 4 makes
+        // net.connect fail with EINVAL exactly when the target is
+        // AAAA-reachable.
+        const norm = addrs.map(a => ({ address: a.address, family: Number(a.family) === 6 ? 6 : 4 }))
+        if (options && options.all) callback(null, norm)
+        else process.nextTick(callback, null, norm[0].address, norm[0].family)
+      },
+      err => process.nextTick(callback, err),
+    )
+  }
+}
+
+function readBody(res, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let total = 0
+    res.on('data', (chunk) => {
+      total += chunk.length
+      if (total > maxBytes) {
+        res.destroy()
+        return reject(Object.assign(new Error(`Response body exceeded ${maxBytes} bytes.`), { status: 502 }))
+      }
+      chunks.push(chunk)
+    })
+    res.on('end', () => resolve(Buffer.concat(chunks)))
+    res.on('error', reject)
+  })
+}
+
+const MAX_INFLATED_BYTES = 64 * 1024 * 1024
+
+function maybeDecompress(buf, encoding) {
+  const enc = String(encoding || '').toLowerCase()
+  const opts = { maxOutputLength: MAX_INFLATED_BYTES }
+  try {
+    if (enc === 'gzip') return zlib.gunzipSync(buf, opts)
+    if (enc === 'deflate') {
+      // Servers disagree on what "deflate" means: try zlib-wrapped first,
+      // then the raw stream many of them actually send.
+      try { return zlib.inflateSync(buf, opts) } catch { return zlib.inflateRawSync(buf, opts) }
+    }
+    if (enc === 'br') return zlib.brotliDecompressSync(buf, opts)
+  } catch (e) {
+    // A bomb or corrupt stream must not balloon memory or crash the caller:
+    // give back nothing rather than compressed garbage dressed as text.
+    if (/output length|unexpected/i.test(e.message)) {
+      throw Object.assign(new Error(`Compressed response exceeded ${MAX_INFLATED_BYTES} bytes.`), { status: 502 })
+    }
+    return buf
+  }
+  return buf
+}
+
+// Minimal Response surface: every guardedFetch consumer uses only
+// ok/status/headers.get/text()/json(). Content-encoding is handled here
+// because node:http does not auto-decompress the way undici does.
+function shimResponse(status, resHeaders, bodyBuf) {
+  const headerMap = new Map()
+  for (const [name, value] of Object.entries(resHeaders)) {
+    headerMap.set(String(name).toLowerCase(), Array.isArray(value) ? value.join(', ') : String(value))
+  }
+  const text = () => Promise.resolve(maybeDecompress(bodyBuf, headerMap.get('content-encoding')).toString('utf8'))
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: name => headerMap.get(String(name).toLowerCase()) ?? null },
+    text,
+    json: async () => {
+      const raw = (await text()).trim()
+      if (!raw) throw new Error('Empty response body.')
+      return JSON.parse(raw)
+    },
+  }
+}
+
+function requestOnce(urlObj, { method, headers, body, timeoutMs, allowLoopback }) {
+  return new Promise((resolve, reject) => {
+    const isTls = urlObj.protocol === 'https:'
+    const sendHeaders = { ...headers }
+    let payload = null
+    if (body != null) {
+      payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8')
+      if (!Object.keys(sendHeaders).some(k => k.toLowerCase() === 'content-length')) {
+        sendHeaders['content-length'] = String(payload.length)
+      }
+    }
+    if (!Object.keys(sendHeaders).some(k => k.toLowerCase() === 'host')) {
+      sendHeaders.host = urlObj.host
+    }
+
+    const req = (isTls ? https : http).request({
+      host: urlObj.hostname,
+      port: urlObj.port || (isTls ? 443 : 80),
+      path: `${urlObj.pathname}${urlObj.search}`,
+      method,
+      headers: sendHeaders,
+      servername: isTls ? urlObj.hostname : undefined,
+      lookup: makePinnedLookup({ allowLoopback }),
+      signal: AbortSignal.timeout(timeoutMs),
+    }, (res) => {
+      // Buffer immediately so redirect hops can drain-and-discard while the
+      // final caller receives the full body.
+      resolve({ res, bufferPromise: readBody(res, 64 * 1024 * 1024) })
+    })
+
+    req.on('error', err => reject(err))
+    if (payload != null) req.write(payload)
+    req.end()
+  })
+}
+
+async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers = {}, body = null, allowLoopback = false } = {}) {
   let url
   try { url = new URL(rawUrl) } catch { throw Object.assign(new Error('Invalid URL.'), { status: 400 }) }
+
+  // Integrations whose documented target is a host-local daemon (the local
+  // threat-feed bouncer API, self-hosted mCaptcha) are unreachable under the
+  // private-range guard — and "publish your internal service publicly to
+  // make this work" is worse than the risk being prevented. allowLoopback
+  // opts in per request: resolution happens normally but results are not
+  // rejected for being private or reserved. That is an explicit operator
+  // trust decision about one configured endpoint — only point it at a daemon
+  // you control. Callers without the flag keep full strictness.
 
   // Redirects can change the method out from under us, so both travel
   // through the hop loop together rather than being captured once.
@@ -136,21 +330,33 @@ async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers 
     if (!ALLOWED_PROTOCOLS.has(url.protocol)) {
       throw Object.assign(new Error(`Refusing to follow a ${url.protocol} URL.`), { status: 400 })
     }
-    await resolvePublicAddresses(url.hostname)
     visited.push(url.toString())
 
-    const res = await fetch(url.toString(), {
+    // One resolution, one verdict, one connection. The lookup passed to the
+    // request returns only addresses this module has already judged, so the
+    // socket cannot land anywhere else even if DNS changes between here and
+    // connect().
+    await resolvePinned(url.hostname, { allowLoopback })
+
+    const { res, bufferPromise } = await requestOnce(url, {
       method: sendMethod,
       headers: sendHeaders,
-      ...(sendBody == null ? {} : { body: sendBody }),
-      redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
+      body: sendBody,
+      timeoutMs,
+      allowLoopback,
     })
 
-    const location = res.headers.get('location')
-    if (![301, 302, 303, 307, 308].includes(res.status) || !location) {
-      return { response: res, chain: visited }
+    const location = res.headers.location
+    if (![301, 302, 303, 307, 308].includes(res.statusCode) || !location) {
+      const buffered = await bufferPromise
+      res.destroy()
+      return { response: shimResponse(res.statusCode, res.headers, buffered), chain: visited }
     }
+    // Redirect bodies are never used — discard the stream outright so a
+    // huge redirect payload cannot pin memory across the hop, and swallow
+    // the abandoned read's rejection.
+    bufferPromise.catch(() => {})
+    res.destroy()
     try { url = new URL(location, url) } catch {
       throw Object.assign(new Error('Redirect target is not a valid URL.'), { status: 400 })
     }
@@ -158,7 +364,7 @@ async function guardedFetch(rawUrl, { timeoutMs = 8000, method = 'GET', headers 
     // 307/308 preserve the method and body; 301/302/303 degrade to a bodyless
     // GET, which is what browsers do and what keeps a secret-bearing POST body
     // from being replayed to a redirect target.
-    if (res.status !== 307 && res.status !== 308) {
+    if (res.statusCode !== 307 && res.statusCode !== 308) {
       sendMethod = 'GET'
       if (sendBody != null) {
         sendBody = null
@@ -177,4 +383,7 @@ module.exports = {
   resolvePublicAddresses,
   guardedFetch,
   MAX_REDIRECTS,
+  // Test-only surface: lets the suite drive the pinned lookup directly to
+  // prove it never delivers an unjudged address.
+  _test: { makePinnedLookup },
 }

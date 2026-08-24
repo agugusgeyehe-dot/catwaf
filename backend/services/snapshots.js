@@ -139,8 +139,16 @@ function restore(id, { req = null, reload = true } = {}) {
     req,
     reload,
     mutate: (s) => {
+      // Same __proto__ hygiene as configTx.restoreWaf(): a tampered or
+      // hand-edited snapshot must not be able to change Object.prototype
+      // through Object.assign's [[Set]] semantics.
+      const clean = {}
+      for (const [k, v] of Object.entries(JSON.parse(JSON.stringify(restored)))) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+        clean[k] = v
+      }
       for (const key of Object.keys(s.WAF)) delete s.WAF[key]
-      Object.assign(s.WAF, JSON.parse(JSON.stringify(restored)))
+      Object.assign(s.WAF, clean)
       for (const [k, v] of Object.entries(state.DEFAULT_WAF)) {
         if (!(k in s.WAF)) s.WAF[k] = JSON.parse(JSON.stringify(v))
       }

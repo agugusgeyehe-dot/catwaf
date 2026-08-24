@@ -11,8 +11,10 @@
 // placeholder back is treated as "leave unchanged" rather than "clear it".
 
 const db = require('../db')
+const configLock = require('../configLock')
 const { SCHEMA, defaultsFor, GROUP_NAMES } = require('./schema')
 const { validateField } = require('./types')
+const { stripUnsafeKeys } = require('../sanitize')
 
 const KEY_PREFIX = 'ext:'
 const REDACTED = '__catwaf_unchanged__'
@@ -74,7 +76,7 @@ function get(group) {
   syncRev()
   if (cache.has(group)) return cache.get(group)
   const stored = db.getState(storageKey(group))
-  const value = { ...defaultsFor(group), ...(stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {}) }
+  const value = { ...defaultsFor(group), ...(stored && typeof stored === 'object' && !Array.isArray(stored) ? stripUnsafeKeys(stored) : {}) }
   cache.set(group, value)
   return value
 }
@@ -140,31 +142,39 @@ function validate(group, patch, { merge = true } = {}) {
 }
 
 function set(group, patch, { merge = true } = {}) {
-  const v = validate(group, patch, { merge })
-  if (!v.ok) return v
-  db.setState(storageKey(group), v.value)
-  cache.set(group, v.value)
-  bumpRev()
-  return { ok: true, value: v.value, redacted: redact(group, v.value) }
+  // Serialized with every other config writer; safe to call inside an
+  // open configTx (the lock is re-entrant).
+  return configLock.withConfigLock(() => {
+    const v = validate(group, patch, { merge })
+    if (!v.ok) return v
+    db.setState(storageKey(group), v.value)
+    cache.set(group, v.value)
+    bumpRev()
+    return { ok: true, value: v.value, redacted: redact(group, v.value) }
+  })
 }
 
 // Direct write with no validation. Only for restore paths, which are
 // replaying values that were already validated when they were first set.
 function replace(group, value) {
   if (!isGroup(group)) return
-  const merged = { ...defaultsFor(group), ...(value && typeof value === 'object' ? value : {}) }
-  db.setState(storageKey(group), merged)
-  cache.set(group, merged)
-  bumpRev()
+  configLock.withConfigLock(() => {
+    const merged = { ...defaultsFor(group), ...(value && typeof value === 'object' ? stripUnsafeKeys(value) : {}) }
+    db.setState(storageKey(group), merged)
+    cache.set(group, merged)
+    bumpRev()
+  })
 }
 
 function reset(group) {
   if (!isGroup(group)) return { ok: false, error: `Unknown settings group "${group}"` }
-  const value = defaultsFor(group)
-  db.setState(storageKey(group), value)
-  cache.set(group, value)
-  bumpRev()
-  return { ok: true, value, redacted: redact(group, value) }
+  return configLock.withConfigLock(() => {
+    const value = defaultsFor(group)
+    db.setState(storageKey(group), value)
+    cache.set(group, value)
+    bumpRev()
+    return { ok: true, value, redacted: redact(group, value) }
+  })
 }
 
 function snapshot() {

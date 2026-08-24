@@ -11,6 +11,12 @@ const C = {
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR
 const c = (s, ...codes) => useColor ? codes.join('') + s + C.reset : s
 
+// Event fields (URI, user agent, client IP) come from attacker-shaped HTTP
+// traffic. Strip every escape/control byte before the terminal renders them.
+function safe(s) {
+  return String(s ?? '').replace(/\x1b/g, '').replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+}
+
 const SEV_COLOR = {
   critical: C.red, emergency: C.red, alert: C.red,
   error: C.red, high: C.red,
@@ -56,10 +62,10 @@ async function cmdExplain(positional, flags) {
   kv('Paranoia level', `${result.waf.paranoia_level} of 4`)
   kv('Matched component', result.matched_component)
   console.log('')
-  kv('Method', e.method)
-  kv('Request', e.uri)
-  kv('Client IP', e.client_ip)
-  kv('User-Agent', e.user_agent)
+  kv('Method', safe(e.method))
+  kv('Request', safe(e.uri))
+  kv('Client IP', safe(e.client_ip))
+  kv('User-Agent', safe(e.user_agent))
 
   console.log('\n  ' + c(`Matched rules (${result.matched_rules.length})`, C.bold))
   if (!result.matched_rules.length) console.log(c('    none recorded', C.dim))
@@ -365,7 +371,7 @@ async function cmdAudit(flags) {
   if (payload.recent_attacks.length) {
     console.log('\n  ' + c('Recent blocked requests', C.bold))
     for (const r of payload.recent_attacks) {
-      console.log(`    ${c(r.id, C.dim)}  ${r.timestamp}  ${(r.attack_type || '-').padEnd(18)} ${(r.uri || '').slice(0, 44)}`)
+      console.log(`    ${c(r.id, C.dim)}  ${r.timestamp}  ${(r.attack_type || '-').padEnd(18)} ${safe((r.uri || '').slice(0, 44))}`)
     }
     console.log(c('\n  Inspect one with: catwaf explain <event-id>', C.dim))
   }

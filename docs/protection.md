@@ -209,12 +209,56 @@ The dashboard's **Challenge Gate** page has a scope tester: describe a
 hypothetical request and it tells you whether that visitor would be challenged
 and why. Use it on your own monitoring before turning the gate on.
 
+(The enforcement pipeline's own test endpoint, `POST /api/protect/test`, is
+admin-only and dry-run by design: it reports what *would* happen to an
+address — including bans it would earn — without writing any ban or probing
+the host.)
+
 ### Tokens
 
 A solved challenge issues a signed token, bound to the address and — while the
 gate is on — the browser's user agent. It cannot be handed to another client,
 extended by editing it, or replayed after it expires. The cookie is `HttpOnly`,
 `SameSite=Lax`, and `Secure` whenever the site is served over HTTPS.
+
+### Canary auto-ban
+
+Some paths are intent, not traffic — `/.env`, `/.git/config`, `/.htpasswd`.
+No legitimate visitor ever requests them, so CatWAF treats the first hit as
+a confession: the address is banned immediately (with repeat-offender
+escalation) before any payload is evaluated. Enable under Settings → Canary
+auto-ban; the path list is yours to edit. The dashboard's protection test
+reports what a canary hit would do without actually banning anyone.
+
+### Edge ban enforcement
+
+A ban normally costs the banned client nothing but a refused forward_auth
+hop. With edge enforcement on, the newest active bans are rendered straight
+into the Caddyfile as a `remote_ip` matcher with an `abort` handler — the
+connection dies at Caddy, no hop, no evaluation, no bytes to your origin.
+The list refreshes every few seconds and within ~2 seconds of any new ban;
+allowlisted addresses (in either direction of CIDR containment) are never
+edge-dropped.
+
+### Kernel-level drops (opt-in)
+
+For hosts where you want banned addresses dead at SYN: CatWAF can mirror
+active bans into an nftables set it owns (`catwaf_edge`). Requires
+`CATWAF_KERNEL_BANS=1`, root, nftables, and one forwarding rule you apply
+yourself:
+
+    catwaf kernel-bans print-rules | sudo nft -f -
+
+CatWAF touches only its own table and replaces it atomically each refresh.
+
+### Under-attack mode
+
+Settings → Anti-DDoS → UNDER-ATTACK MODE is the single switch for the bad
+hours: every visitor gets the JavaScript challenge regardless of trigger,
+and cached verdicts drop from 20s to ~2s so turning it off takes effect
+almost immediately. Slowloris-resistant connection timeouts live under
+Connections (read/write/idle) and are enforced by Caddy before any route
+runs.
 
 ### Previewing
 

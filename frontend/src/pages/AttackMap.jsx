@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Globe2, RotateCcw, Pause, Play, AlertTriangle, ShieldAlert, ChevronRight, Box, Square, X } from 'lucide-react'
 import { api } from '../utils/api.js'
 import { usePreferences } from '../utils/preferences.jsx'
@@ -7,19 +7,31 @@ import { Skeleton, EmptyState } from '../components/ui.jsx'
 import AttackGlobeCanvas from '../components/attackmap/AttackGlobeCanvas.jsx'
 import { severityMeta } from '../utils/severity.js'
 
+// The hover tooltip compares every preset window, independent of which one
+// is currently painted. Backend accepts h/d/w and clamps to a year.
+const HOVER_WINDOWS = [
+  { id: '24h', label: '24 hours' },
+  { id: '5d',  label: '5 days' },
+  { id: '7d',  label: '7 days' },
+  { id: '30d', label: '30 days' },
+]
+
 const WINDOW_OPTIONS = [
-  { id: '1h',  label: '1h' },
-  { id: '24h', label: '24h' },
-  { id: '7d',  label: '7d' },
+  { id: '1h',  label: 'Live' },
+  { id: '24h', label: '1 day' },
+  { id: '5d',  label: '5 days' },
+  { id: '7d',  label: 'Week' },
+  { id: '30d', label: '30 days' },
 ]
 
 const PERFORMANCE_LAND_STEP = { low: 4, balanced: 2.2, high: 1.4 }
 const PERFORMANCE_MARKER_CAP = { low: 100, balanced: 300, high: 600 }
 
+const COUNTS_TTL_MS = 60_000
+
 export default function AttackMap() {
   const { prefs, set: setPref } = usePreferences()
   const motionOff = prefs.motion === 'off'
-  const motionLevel = prefs.motion
 
   const [points, setPoints] = useState(null)
   const [events, setEvents] = useState([])
@@ -30,6 +42,12 @@ export default function AttackMap() {
   const [selected, setSelected] = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [resetSignal, setResetSignal] = useState(0)
+
+  // Hover tooltip: the point under the cursor + screen position + cached
+  // per-window totals for that same location.
+  const [hover, setHover] = useState(null) // { point, x, y }
+  const countsCacheRef = useRef(new Map()) // winId -> { at, byKey: Map }
+  const [countsVersion, bumpCounts] = useState(0)
 
   const mode = prefs.mapProjection
   const setMode = v => setPref('mapProjection', v)
@@ -62,6 +80,36 @@ export default function AttackMap() {
     const id = setInterval(fetchData, 15000)
     return () => clearInterval(id)
   }, [fetchData, autoRefresh])
+
+  // ── Per-window totals for the hover tooltip ──────────────────────────
+  // Fetched lazily (only once a hover actually happens), cached for 60s so
+  // sweeping the globe doesn't hammer the API, invalidated implicitly by
+  // the TTL rather than the paint window.
+  const ensureCounts = useCallback(async (winId) => {
+    const cached = countsCacheRef.current.get(winId)
+    if (cached && Date.now() - cached.at < COUNTS_TTL_MS) return
+    try {
+      const res = await api.get(`/attack-map?window=${winId}`)
+      const byKey = new Map()
+      for (const p of (res.points || [])) {
+        byKey.set(`${p.lat},${p.lon}`, p.count || 0)
+      }
+      countsCacheRef.current.set(winId, { at: Date.now(), byKey })
+      bumpCounts(v => v + 1)
+    } catch { /* tooltip simply shows fewer windows */ }
+  }, [])
+
+  const handleHover = useCallback((point, screen) => {
+    if (!point) { setHover(null); return }
+    setHover({ point, x: screen?.x ?? 0, y: screen?.y ?? 0 })
+    if (screen) {
+      for (const w of HOVER_WINDOWS) void ensureCounts(w.id)
+    }
+  }, [ensureCounts])
+
+  const hoverKey = hover ? `${hover.point.lat},${hover.point.lon}` : null
+  // countsVersion is read so re-render happens when a background fetch lands.
+  void countsVersion
 
   const attackTypes = useMemo(() => {
     if (!points) return []
@@ -138,7 +186,11 @@ export default function AttackMap() {
       )}
 
       <div className="attack-map-layout" style={{ display: 'flex', gap: 16, flex: 1, minHeight: 0 }}>
-        <div className="card" style={{ flex: 1, minWidth: 0, minHeight: 320, position: 'relative', padding: 0, overflow: 'hidden' }}>
+        <div
+          className="card"
+          style={{ flex: 1, minWidth: 0, minHeight: 320, position: 'relative', padding: 0, overflow: 'hidden' }}
+          onMouseLeave={() => setHover(null)}
+        >
           {loading && !points ? (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Skeleton h="h-full" className="w-full" />
@@ -155,6 +207,7 @@ export default function AttackMap() {
                 markerCap={markerCap}
                 selected={selected}
                 onSelect={setSelected}
+                onHover={handleHover}
                 mode={mode}
                 autoRotate={autoRotate}
                 motionOff={motionOff}
@@ -171,6 +224,47 @@ export default function AttackMap() {
                 </div>
               )}
             </>
+          )}
+
+          {/* Hover tooltip — follows the cursor, shows totals across windows */}
+          {hover && !loading && (
+            <div style={{
+              position: 'fixed',
+              left: Math.min(hover.x + 14, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 240),
+              top: Math.min(hover.y + 14, (typeof window !== 'undefined' ? window.innerHeight : 800) - 170),
+              zIndex: 50,
+              pointerEvents: 'none',
+              background: 'var(--cat-card-final, var(--cat-card))',
+              border: '1px solid var(--cat-border)',
+              borderRadius: 10,
+              padding: '9px 12px',
+              minWidth: 190,
+              boxShadow: '0 10px 28px rgba(0,0,0,0.45)',
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--cat-text)' }}>
+                {hover.point.city ? `${hover.point.city}, ` : ''}{hover.point.country_code || 'Unknown'}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--cat-sub)', margin: '2px 0 6px' }}>
+                Attacks from this location
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 10px', fontSize: 11 }}>
+                {HOVER_WINDOWS.map(w => {
+                  const entry = countsCacheRef.current.get(w.id)
+                  const n = entry?.byKey?.get(hoverKey)
+                  return (
+                    <div key={w.id} style={{ display: 'contents' }}>
+                      <span style={{ color: 'var(--cat-sub)' }}>{w.label}</span>
+                      <span style={{ color: 'var(--cat-text)', fontWeight: 600, textAlign: 'right' }}>
+                        {n === undefined ? '…' : Number(n).toLocaleString()}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: 9.5, color: 'var(--cat-sub)', marginTop: 5, opacity: 0.8 }}>
+                Click a dot for attack types · paint window: {WINDOW_OPTIONS.find(w => w.id === windowSpec)?.label}
+              </div>
+            </div>
           )}
 
           {selected && (
@@ -195,7 +289,7 @@ export default function AttackMap() {
           )}
 
           <div style={{ position: 'absolute', top: 12, right: 12, display: 'flex', gap: 8, fontSize: 10, color: 'var(--cat-sub)' }}>
-            {Object.entries({ Critical: '#f25c5c', High: '#f59e0b', Medium: '#eab308', Low: '#7c8db0' }).map(([label, color]) => (
+            {Object.entries({ Critical: '#ff4d4d', High: '#ff7043', Medium: '#ffa62b', Low: '#ff8fa3' }).map(([label, color]) => (
               <span key={label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ width: 7, height: 7, borderRadius: '50%', background: color }} /> {label}
               </span>

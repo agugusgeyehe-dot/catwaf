@@ -123,9 +123,10 @@ async function waitForDown(url, attempts = 40, delayMs = 200) {
   ENV = {
     ...process.env,
     PORT: String(PORT),
-    // Bind every interface so the LAN-address case is reachable. This is what
-    // a self-hosted install does.
-    HOST: '0.0.0.0',
+    // Bind every interface so the LAN-address case is reachable — but only
+    // when the operator opts in (CATWAF_TEST_LAN=1). Default runs keep a
+    // real admin account with a known test password off the LAN.
+    HOST: process.env.CATWAF_TEST_LAN === '1' ? '0.0.0.0' : '127.0.0.1',
     DB_DIR: path.join(WORK, 'db'),
     JWT_SECRET: 'c'.repeat(64),
     CADDYFILE_PATH: path.join(WORK, 'Caddyfile'),
@@ -177,9 +178,11 @@ async function waitForDown(url, attempts = 40, delayMs = 200) {
       ['127.0.0.1', `http://127.0.0.1:${PORT}`],
       ['localhost', `http://localhost:${PORT}`],
     ]
-    const lan = lanAddress()
+    // The LAN case needs the loopback-exempt bind (CATWAF_TEST_LAN=1);
+    // without it there is nothing listening on a non-loopback address.
+    const lan = process.env.CATWAF_TEST_LAN === '1' ? lanAddress() : null
     if (lan) origins.push([`LAN address (${lan})`, `http://${lan}:${PORT}`])
-    else console.log('  note  no non-loopback interface on this machine — LAN case not exercised')
+    else console.log('  note  LAN case not exercised (set CATWAF_TEST_LAN=1 to opt in)')
 
     for (const [label, base] of origins) {
       const { context, page } = await freshPage()

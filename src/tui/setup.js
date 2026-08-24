@@ -181,6 +181,10 @@ function writeEnvFile(updates) {
   const merged = { ...current, ...updates }
   const lines = Object.entries(merged).map(([k, v]) => `${k}=${v}`)
   fs.writeFileSync(ENV_PATH, lines.join('\n') + '\n', { mode: 0o600 })
+  // Node applies `mode` only at file creation. An existing .env that was
+  // once group/world-readable would stay loose through every rewrite —
+  // force the mode on every write, matching setup.sh.
+  try { fs.chmodSync(ENV_PATH, 0o600) } catch {}
 }
 
 function ensureJwtSecret() {
@@ -459,8 +463,10 @@ async function configureCatAI() {
       header: 'Step 5 / 6 — CatAI Assistant (optional)',
       body: [
         '', tk.color('Ollama isn\'t installed or isn\'t running.', tk.colors.yellow), '',
-        'Install it yourself later and re-run setup to enable CatAI:', '',
-        tk.color('  curl -fsSL https://ollama.com/install.sh | sh', tk.colors.cyan),
+        'Install it yourself later and re-run setup to enable CatAI', '',
+        '(download first, read it — never pipe a remote script into a shell):', '',
+        tk.color('  curl -fsSL https://ollama.com/install.sh -o /tmp/ollama-install.sh', tk.colors.cyan),
+        tk.color('  less /tmp/ollama-install.sh && sh /tmp/ollama-install.sh', tk.colors.cyan),
         tk.color(`  ollama pull ${tier.model}`, tk.colors.cyan),
         '',
       ],
@@ -507,17 +513,52 @@ async function startService(info) {
   tk.renderFrame({ header: 'Step 6 / 6 — Start CatWAF', body: ['Installing the CatWAF service…'] })
 
   if (hasSystemd()) {
+    // Mirror the hardened unit setup.sh installs: same sandbox, and the
+    // dedicated service account when it exists. The previous unit here ran
+    // as root with no hardening at all — re-running interactive setup after
+    // the installer silently downgraded a hardened install to root.
+    const hasServiceUser = (() => {
+      try { execFileSync('id', ['-u', 'catwaf'], { stdio: 'ignore' }); return true } catch { return false }
+    })()
+    if (hasServiceUser) {
+      // The service account must be able to read its own tree (including
+      // the 0600 .env) or the unit starts without any secrets loaded.
+      try { execFileSync('chown', ['-R', 'catwaf:catwaf', PROJECT_ROOT], { stdio: 'ignore' }) } catch {}
+    }
+    // ProtectHome=true makes /home and /root *inaccessible*, which
+    // ReadWritePaths cannot carve back open — so when this checkout lives
+    // under either, degrade to read-only (which ReadWritePaths can).
+    const protectHome = /^\/(home|root)(\/|$)/.test(PROJECT_ROOT) ? 'read-only' : 'true'
+    const userLines = hasServiceUser
+      ? `User=catwaf
+Group=catwaf
+EnvironmentFile=${PROJECT_ROOT}/.env
+`
+      : ''
+    // The sqlite flag is applied inside scripts/start.js (execArgv on the
+    // backend spawn) — flags here would only decorate the supervisor.
     const unit = `[Unit]
-Description=CatWAF dashboard
-After=network.target
+Description=CatWAF API and dashboard
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${PROJECT_ROOT}
+${userLines}WorkingDirectory=${PROJECT_ROOT}
 ExecStart=${process.execPath} scripts/start.js
 Restart=on-failure
-RestartSec=3
-Environment=NODE_ENV=production
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=${protectHome}
+ReadWritePaths=${PROJECT_ROOT} ${PROJECT_ROOT}/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

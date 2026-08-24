@@ -13,7 +13,9 @@ process.env.CADDYFILE_PATH = path.join(DATA_DIR, 'Caddyfile')
 // `reloadCaddy()` POSTs to CADDY_ADMIN_URL, which defaults to Caddy's real
 // admin port — running the suite on a host where CatWAF is live would replace
 // that Caddy's configuration with this file's fixture and take the site down.
-process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
+// Unconditional: an inherited CADDY_ADMIN_URL could point this suite's fixture
+// Caddyfile load at a live Caddy instance.
+process.env.CADDY_ADMIN_URL = 'http://127.0.0.1:19918'
 fs.writeFileSync(process.env.CADDYFILE_PATH, ':80 {\n  respond "test"\n}\n')
 
 const ROOT = path.join(__dirname, '..')
@@ -479,39 +481,104 @@ const server = app.listen(0, '127.0.0.1', async () => {
     // guardedFetch once accepted no `body` at all, so every POST through it —
     // captcha verification, telemetry, threat-network submission — silently
     // sent an empty request. A challenge nobody can pass locks users out of a
-    // protected site, so the body reaching fetch is a security property.
+    // protected site, so the body reaching the wire is a security property.
+    // These run against a real local server now: they exercise the actual
+    // transport (DNS-pinned lookup included) rather than mocking fetch.
     {
-      const realFetch = global.fetch
-      const sent = []
-      let redirect = null
-      global.fetch = async (url, opts) => {
-        sent.push({ method: opts.method, body: opts.body ?? null, headers: opts.headers || {} })
-        if (redirect && sent.length === 1) return { status: redirect, headers: new Map([['location', '/final']]) }
-        return { status: 200, ok: true, headers: new Map() }
-      }
+      const http = require('http')
+      const seen = []
+      const server = http.createServer((req, res) => {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', () => {
+          seen.push({ path: req.url, method: req.method, body, contentType: req.headers['content-type'] || null })
+          if (req.url === '/r307') { res.writeHead(307, { location: '/final' }); return res.end() }
+          if (req.url === '/r302') { res.writeHead(302, { location: '/final' }); return res.end() }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true }))
+        })
+      })
+      await new Promise(r => server.listen(0, '127.0.0.1', r))
+      const base = `http://127.0.0.1:${server.address().port}`
       try {
-        await netGuard.guardedFetch('http://1.1.1.1/verify', {
+        let at = 0
+        await netGuard.guardedFetch(`${base}/verify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'secret=s&response=t',
+          allowLoopback: true,
         })
-        check('guardedFetch transmits the POST body', sent[0]?.body === 'secret=s&response=t', sent[0])
+        check('guardedFetch transmits the POST body', seen[at]?.body === 'secret=s&response=t', seen[at])
+        at = seen.length
 
-        sent.length = 0; redirect = 307
-        await netGuard.guardedFetch('http://1.1.1.1/r', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"a":1}',
+        await netGuard.guardedFetch(`${base}/r307`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"a":1}', allowLoopback: true,
         })
+        // Two hits for a redirect: the 307 itself, then the preserved POST.
         check('a 307 redirect preserves method and body',
-          sent[1]?.method === 'POST' && sent[1]?.body === '{"a":1}', sent[1])
+          seen[at]?.method === 'POST' && seen[at]?.body === '{"a":1}'
+            && seen[at + 1]?.method === 'POST' && seen[at + 1]?.body === '{"a":1}', seen.slice(at, at + 2))
+        at = seen.length
 
-        sent.length = 0; redirect = 302
-        await netGuard.guardedFetch('http://1.1.1.1/r', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"secret":"x"}',
+        await netGuard.guardedFetch(`${base}/r302`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"secret":"x"}', allowLoopback: true,
         })
         check('a 302 redirect does not replay a secret-bearing body',
-          sent[1]?.method === 'GET' && sent[1]?.body === null && !('Content-Type' in sent[1].headers), sent[1])
+          seen[at]?.method === 'POST' && seen[at]?.body === '{"secret":"x"}'
+            && seen[at + 1]?.method === 'GET' && seen[at + 1]?.body === '' && seen[at + 1]?.contentType === null,
+          seen.slice(at, at + 2))
       } finally {
-        global.fetch = realFetch
+        server.close()
+      }
+    }
+
+    // Anti-rebinding: DNS is resolved once through our own lookup, judged,
+    // and only the judged addresses are handed to the socket. A DNS answer
+    // of a private address must be refused outright (the old flow validated
+    // one resolution and connected on a second, attackable one).
+    {
+      const dnsCb = require('dns')
+      const realLookup = dnsCb.lookup
+      dnsCb.lookup = (hostname, opts, cb) => {
+        if (typeof opts === 'function') cb = opts
+        process.nextTick(() => cb(null, [{ address: '10.9.9.9', family: 4 }]))
+      }
+      let refused = false
+      try { await netGuard.guardedFetch('http://rebind.example/') } catch (e) { refused = /publicly routable/.test(e.message) }
+      dnsCb.lookup = realLookup
+      check('a DNS answer of a private address is refused before connecting', refused)
+
+      // The pinned lookup hands ONLY the validated address to the socket:
+      // simulate DNS flipping between a public and a private answer and make
+      // sure whatever address reaches the callback is the judged public one.
+      let flip = false
+      const pinned = netGuard._test?.makePinnedLookup?.({ allowLoopback: false })
+      if (pinned) {
+        dnsCb.lookup = (hostname, opts, cb) => {
+          if (typeof opts === 'function') cb = opts
+          flip = !flip
+          process.nextTick(() => cb(null, [{ address: flip ? '10.9.9.9' : '93.184.216.34', family: 4 }]))
+        }
+        const delivered = []
+        const v6seen = []
+        for (let i = 0; i < 6; i++) {
+          await new Promise(r => pinned('flip.example', {}, (err, addr, family) => {
+            if (!err) { delivered.push(addr.address); if (family === 4) v6seen.push(false) }
+            r()
+          }))
+        }
+        // AAAA answers must be labeled family 6 — mislabeling made every
+        // dual-stack connection attempt fail with connect EINVAL.
+        dnsCb.lookup = (hostname, opts, cb) => {
+          if (typeof opts === 'function') cb = opts
+          process.nextTick(() => cb(null, [{ address: '2606:4700:4700::1111', family: 6 }]))
+        }
+        await new Promise(r => pinned('v6.example', {}, (err, addr, family) => { v6seen.push(family); r() }))
+        dnsCb.lookup = realLookup
+        check('pinned lookup never delivers an unjudged private address', delivered.every(a => a !== '10.9.9.9'), delivered)
+        check('pinned lookup labels AAAA answers as family 6', v6seen[v6seen.length - 1] === 6, v6seen)
+      } else {
+        check('pinned lookup never delivers an unjudged private address', false, 'makePinnedLookup not exported for test')
       }
     }
 

@@ -5,6 +5,7 @@ const db = require('./db')
 const caddy = require('./caddy')
 const auditSvc = require('./audit')
 const { isValidCaddyPath } = require('./sanitize')
+const configLock = require('./configLock')
 
 const MARKER_START = '# @@CATWAF_SENSITIVE_START@@'
 const MARKER_END   = '# @@CATWAF_SENSITIVE_END@@'
@@ -105,6 +106,9 @@ function buildSensitiveBlock(state) {
 }
 
 function patchCaddyfile(state) {
+  // Same cross-process discipline as caddy.patchWAFCaddyfile (the lock is
+  // re-entrant for callers that already hold it).
+  return configLock.withConfigLock(() => {
   let content = caddy.readCaddyfile()
   const newBlock = buildSensitiveBlock(state)
 
@@ -123,7 +127,8 @@ function patchCaddyfile(state) {
     content = content.slice(0, lastBrace) + '\n' + newBlock + '\n' + content.slice(lastBrace)
   }
 
-  fs.writeFileSync(caddy.CADDYFILE_PATH, content, 'utf8')
+  configLock.atomicWriteFileSync(caddy.CADDYFILE_PATH, content, { mode: 0o644 })
+  })
 }
 
 

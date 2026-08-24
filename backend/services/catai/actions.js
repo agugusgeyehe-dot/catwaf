@@ -13,10 +13,12 @@ function countryNameFor(cc) {
 const DIRECTION = { STRENGTHEN: 'strengthen', WEAKEN: 'weaken' }
 
 function commit(req, label, target, meta) {
-  state.saveWAF(true)
-  const caddy = caddySvc.applyToCaddy(label, req)
-  auditSvc.audit(req, 'catai.apply', target, { action: label, ...meta, caddy_reloaded: caddy.reloaded })
-  return { caddy_reloaded: caddy.reloaded, caddy_error: caddy.error || null }
+  // The mutation is already applied to state.WAF by the caller; updateWAF
+  // re-reads committed state under the config lock first, so a concurrent
+  // CLI change cannot be silently reverted by this persist.
+  const { sync } = state.updateWAF(() => {}, { label, req, syncCaddy: true })
+  auditSvc.audit(req, 'catai.apply', target, { action: label, ...meta, caddy_reloaded: sync.reloaded })
+  return { caddy_reloaded: sync.reloaded, caddy_error: sync.error || null }
 }
 
 const TOOL_SCHEMAS = {
@@ -406,14 +408,12 @@ function restore(prev, req) {
   if (!prev || typeof prev !== 'object' || Array.isArray(prev) || Object.keys(prev).length === 0) {
     return { ok: false, error: 'Nothing to restore.' }
   }
-  for (const [key, value] of Object.entries(prev)) {
-    if (!Object.hasOwn(state.WAF, key)) return { ok: false, error: `Cannot restore unknown field "${key}".` }
-    state.WAF[key] = value
-  }
-  state.saveWAF(true)
-  const caddy = caddySvc.applyToCaddy('catai.undo', req)
-  auditSvc.audit(req, 'catai.undo', Object.keys(prev).join(','), { caddy_reloaded: caddy.reloaded })
-  return { ok: true, caddy_reloaded: caddy.reloaded }
+  const unknown = Object.keys(prev).find(key => !Object.hasOwn(state.WAF, key))
+  if (unknown) return { ok: false, error: `Cannot restore unknown field "${unknown}".` }
+  const { sync } = state.updateWAF(w => { for (const [key, value] of Object.entries(prev)) w[key] = value },
+    { label: 'catai.undo', req, syncCaddy: true })
+  auditSvc.audit(req, 'catai.undo', Object.keys(prev).join(','), { caddy_reloaded: sync.reloaded })
+  return { ok: true, caddy_reloaded: sync.reloaded }
 }
 
 module.exports = {

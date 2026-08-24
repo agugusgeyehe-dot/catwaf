@@ -1,6 +1,7 @@
 
 const fs = require('fs')
 const state = require('./state')
+const configLock = require('./configLock')
 const auditSvc = require('./audit')
 const {
   escapeForDirective, isValidIpOrCidr,
@@ -732,10 +733,14 @@ function renderCaddyfile(content, waf) {
 }
 
 function patchWAFCaddyfile(waf) {
+  // Serialized against every other Caddyfile writer (CLI, jobs, audit-log
+  // rotation, cloudflare origin-lock) and written atomically — see
+  // configLock.js for why both halves matter.
+  return configLock.withConfigLock(() => {
   const content = renderCaddyfile(readCaddyfile(), waf)
 
   try {
-    fs.writeFileSync(CADDYFILE_PATH, content, 'utf8')
+    configLock.atomicWriteFileSync(CADDYFILE_PATH, content, { mode: 0o644 })
   } catch (e) {
     if (e.code === 'EACCES' || e.code === 'EPERM') {
       throw new Error(
@@ -747,6 +752,7 @@ function patchWAFCaddyfile(waf) {
     }
     throw e
   }
+  })
 }
 
 
@@ -864,21 +870,32 @@ function redactCaddyfile(text) {
   if (typeof text !== 'string' || !text) return ''
   return text.split('\n').map(line => {
     // header_up / header_down carrying a shared secret, e.g. the enforce key.
-    let m = line.match(/^(\s*header_(?:up|down)\s+)(\S+)(\s+)(.+)$/)
-    if (m && SECRET_HEADER_RE.test(m[2])) return `${m[1]}${m[2]}${m[3]}"${REDACTED}"`
+    // The name may be preceded by a matcher token (`header_up @m X-Api-Key v`),
+    // so the credential header is matched anywhere among the middle tokens.
+    let m = line.match(/^(\s*header_(?:up|down)\s+)((?:@\S+\s+)?)(\S+)(\s+)(.+)$/)
+    if (m && SECRET_HEADER_RE.test(m[3])) return `${m[1]}${m[2]}${m[3]}${m[4]}"${REDACTED}"`
 
-    // ACME dns-01: `dns <provider> "<api token>"`. A block-opening form
-    // (`dns <provider> {`) carries no inline credential and is left alone.
+    // ACME dns-01: `dns <provider> "<api token>"` and the block form
+    // `dns <provider> { ... api_token "..." }`. Both carry credentials —
+    // the block's inner token lines are caught by the generic key/token
+    // rule below.
     m = line.match(/^(\s*dns\s+)(\S+)(\s+)(.+)$/)
     if (m && m[4].trim() !== '{') return `${m[1]}${m[2]}${m[3]}"${REDACTED}"`
 
-    // basic_auth credential line: `"user" "$2a$12$..."`. The username is kept
-    // — it is already shown in the settings UI — and only the hash is blanked.
-    m = line.match(/^(\s*"?[^"\s]+"?\s+)"?\$2[aby]\$[^"\s]*"?\s*$/)
+    // basic_auth credential line: `"user" "$2a$12$..."` (bcrypt), plus
+    // scrypt/argon-style hashes (`$scrypt$…`, `$argon2…`). The username is
+    // kept — it is already shown in the settings UI — and only the hash is
+    // blanked.
+    m = line.match(/^(\s*"?[^"\s]+"?\s+)"?(\$(?:2[aby]|scrypt|argon2(?:id|d|i)?)\$)[^"\s]*"?\s*$/)
     if (m) return `${m[1]}"${REDACTED}"`
 
-    // Catch-all for any bcrypt hash that appears somewhere else.
-    return line.replace(/\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/g, REDACTED)
+    // Catch-all for hash literals or quoted api_token/client_secret values
+    // appearing anywhere else on a line (comments included).
+    return line
+      .replace(/\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/g, REDACTED)
+      .replace(/\$(?:scrypt|argon2(?:id|d|i)?)\$[^\s"']{8,}/g, REDACTED)
+      .replace(/\b(api_token|client_secret|api_key|secret)\s+"[^"]+"/gi,
+        (_, k) => `${k} "${REDACTED}"`)
   }).join('\n')
 }
 

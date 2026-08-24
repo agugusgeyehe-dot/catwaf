@@ -90,6 +90,9 @@ async function verify(name, token, cfg, remoteIp) {
       timeoutMs: 8000,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
+      // mCaptcha is self-hosted by design — its verify URL points at the
+      // operator's own instance, which is usually on this host.
+      allowLoopback: name === 'mcaptcha',
     })
     const data = await response.json().catch(() => null)
     if (!data) return { ok: false, error: 'The provider returned an unreadable response.' }

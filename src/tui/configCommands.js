@@ -464,6 +464,33 @@ async function cmdBackup(positional, flags) {
     return 0
   }
 
+  if (action === 'restore') {
+    const file = positional[1]
+    if (!file) {
+      console.error(c('Usage: catwaf backup restore <backup.json> [--db] [--allow-redacted] [--confirm-db-restore]', C.yellow))
+      return 1
+    }
+    const result = backups.restoreFromFile(file, {
+      restoreDatabase: !!flags.db,
+      allowRedacted: !!flags['allow-redacted'],
+    })
+    if (!result.ok && result.database?.requires_stopped_services && flags['confirm-db-restore']) {
+      const confirmed = backups.confirmDatabaseRestore(file)
+      result.database = confirmed.ok ? { ok: true, restored: confirmed.restored } : confirmed
+      result.ok = true
+    }
+    if (!out(result, flags.json)) {
+      if (!result.ok) { console.error(c('✗ ' + (result.detail || result.error), C.red)); return 1 }
+      heading('Restore complete')
+      kv('From', result.restored_from)
+      kv('WAF state', result.waf ? 'restored & validated' : 'unchanged')
+      if (result.settings_groups?.length) kv('Settings groups', result.settings_groups.join(', '))
+      kv('Caddyfile', result.caddyfile_replaced ? 'replaced from backup' : 'left untouched')
+      if (result.database) console.log(c('\n  Database: ' + (result.database.error || result.database.instruction || ''), C.yellow))
+    }
+    return result.ok ? 0 : 1
+  }
+
   if (action === 'now' || action === 'run') {
     const result = backups.run({ dryRun: !!flags['dry-run'], destination: flags.destination || null })
     if (out(result, flags.json)) return 0

@@ -16,7 +16,9 @@ process.env.CORAZA_AUDIT_LOG = path.join(DATA_DIR, 'logs', 'audit.json')
 // `reloadCaddy()` POSTs to CADDY_ADMIN_URL, which defaults to Caddy's real
 // admin port — running the suite on a host where CatWAF is live would replace
 // that Caddy's configuration with this file's fixture and take the site down.
-process.env.CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || 'http://127.0.0.1:19918'
+// Unconditional: an inherited CADDY_ADMIN_URL could point this suite's fixture
+// Caddyfile load at a live Caddy instance.
+process.env.CADDY_ADMIN_URL = 'http://127.0.0.1:19918'
 fs.writeFileSync(process.env.CADDYFILE_PATH, '{\n}\n\n:19992 {\n    respond "test" 200\n}\n')
 
 const crypto = require('crypto')

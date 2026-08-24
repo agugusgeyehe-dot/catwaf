@@ -939,6 +939,7 @@ const SCHEMA = {
       retain: { type: 'int', min: 1, max: 365, default: 7, label: 'Backups to keep' },
       include_database: { type: 'bool', default: true, label: 'Include the SQLite database' },
       include_caddyfile: { type: 'bool', default: true, label: 'Include the Caddyfile' },
+      encrypt: { type: 'bool', default: false, label: 'Encrypt backups (AES-256-CBC; requires CATWAF_BACKUP_PASSPHRASE in .env)' },
       redact_secrets: {
         type: 'bool', default: true, label: 'Redact secrets',
         help: 'Uses the same redaction the snapshot export already applies, so API tokens and password hashes never land in a backup file.',
@@ -1079,6 +1080,80 @@ const SCHEMA = {
       busy_timeout_ms: { type: 'int', min: 0, max: 120000, default: 5000, label: 'SQLite busy timeout (ms)' },
       journal_mode: { type: 'enum', values: ['WAL', 'DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY'], default: 'WAL', label: 'SQLite journal mode' },
       synchronous: { type: 'enum', values: ['OFF', 'NORMAL', 'FULL', 'EXTRA'], default: 'NORMAL', label: 'SQLite synchronous mode' },
+    },
+  },
+
+  // ─── Canary auto-ban ─────────────────────────────────────────────────
+  canary: {
+    label: 'Canary auto-ban',
+    summary: 'Paths no legitimate visitor requests. Touching one is intent — probe it and the address is banned outright, before any payload is even evaluated.',
+    fields: {
+      enabled: { type: 'bool', default: false, label: 'Enabled' },
+      paths: { type: 'list', item: 'uri', max: 25, default: ['/.env', '/.git/config', '/.git/HEAD', '/.htpasswd', '/.aws/credentials', '/wp-config.php.bak'], label: 'Canary paths' },
+      ban_seconds: { type: 'int', min: 300, max: 2592000, default: 86400, label: 'Ban duration (seconds)' },
+      escalate: { type: 'bool', default: true, label: 'Escalate repeat offenders' },
+    },
+  },
+
+  // ─── Edge ban enforcement ────────────────────────────────────────────
+  edge_bans: {
+    label: 'Edge ban enforcement',
+    advanced: true,
+    summary: 'Render the newest active bans directly into the Caddyfile so banned addresses are dropped by Caddy itself — no forward_auth hop, no WAF evaluation, no bytes to the origin.',
+    fields: {
+      enabled: { type: 'bool', default: false, label: 'Enabled' },
+      max_rules: { type: 'int', min: 50, max: 2000, default: 500, label: 'Maximum rules rendered (newest first)' },
+      include_cidrs: { type: 'bool', default: true, label: 'Include CIDR-range bans' },
+      refresh_seconds: { type: 'int', min: 15, max: 600, default: 30, label: 'Refresh interval (seconds)' },
+    },
+  },
+
+  // ─── Kernel-level drops (nftables, opt-in) ───────────────────────────
+  kernel_bans: {
+    label: 'Kernel-level drops',
+    advanced: true,
+    summary: 'Mirror active bans into an nftables set so banned addresses die at SYN, before Caddy. Requires CATWAF_KERNEL_BANS=1 in .env, root, nftables, and a one-time firewall rule you add yourself (catwaf kernel-bans print-rules). Host installs only.',
+    fields: {
+      enabled: { type: 'bool', default: false, label: 'Enabled' },
+      max_entries: { type: 'int', min: 100, max: 262144, default: 65536, label: 'Maximum set entries' },
+    },
+  },
+
+  // ─── Anti-DDoS (#75) ─────────────────────────────────────────────────
+  ddos: {
+    label: 'Anti-DDoS',
+    summary: 'Under-attack switch: challenges every visitor (JavaScript proof), shortens cached verdicts to seconds, and keeps canary/edge/kernel enforcement at their most responsive. Connection timeouts live under Connections.',
+    fields: {
+      emergency: { type: 'bool', default: false, label: 'UNDER-ATTACK MODE' },
+      verdict_ttl_seconds: { type: 'int', min: 1, max: 20, default: 2, label: 'Verdict cache TTL while under attack (seconds)' },
+    },
+  },
+
+  // ─── SIEM event stream (#76) ─────────────────────────────────────────
+  siem: {
+    label: 'SIEM event stream',
+    advanced: true,
+    summary: 'Append every blocked request as JSON lines to data/siem.jsonl (rotated) and optionally POST batches to an HTTP collector.',
+    fields: {
+      enabled: { type: 'bool', default: false, label: 'Enabled' },
+      include_allowed: { type: 'bool', default: false, label: 'Include allowed requests too' },
+      http_url: { type: 'str', item: 'url', default: '', maxLen: 2048, label: 'Optional HTTP collector URL (POSTs JSONL)' },
+      batch_max: { type: 'int', min: 50, max: 5000, default: 500, label: 'Max events per poll/batch' },
+    },
+  },
+
+  // ─── Alert delivery (#74) ────────────────────────────────────────────
+  alert_dispatch: {
+    label: 'Alert delivery',
+    secret: true,
+    summary: 'Actually send the alerts configured on the Alerts page: attack spikes, new bans and engine changes delivered to your webhooks or Telegram.',
+    fields: {
+      enabled: { type: 'bool', default: false, label: 'Enabled' },
+      spike_window_min: { type: 'int', min: 1, max: 60, default: 5, label: 'Spike window (minutes)' },
+      cooldown_min: { type: 'int', min: 1, max: 1440, default: 15, label: 'Per-alert cooldown (minutes)' },
+      on_spike: { type: 'bool', default: true, label: 'Alert on blocked-request spikes' },
+      on_new_ban: { type: 'bool', default: false, label: 'Alert on every new automatic ban' },
+      on_engine_change: { type: 'bool', default: true, label: 'Alert on engine/mode changes' },
     },
   },
 }

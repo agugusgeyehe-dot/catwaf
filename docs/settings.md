@@ -66,6 +66,12 @@ out.
 | [`sites`](#sites) | CatWAF Free protects one site. The registry exists so features stay single-site-safe as they grow. |
 | [`cluster`](#cluster) | Optional external store for counters that must be consistent across nodes. |
 | [`database`](#database) | Engine choice and pool tuning. SQLite is the right answer at Free's scale. |
+| [`canary`](#canary) | Paths no legitimate visitor requests. Touching one is intent — probe it and the address is banned outright, before any payload is even evaluated. |
+| [`edge_bans`](#edge_bans) | Render the newest active bans directly into the Caddyfile so banned addresses are dropped by Caddy itself — no forward_auth hop, no WAF evaluation, no bytes to the origin. |
+| [`kernel_bans`](#kernel_bans) | Mirror active bans into an nftables set so banned addresses die at SYN, before Caddy. Requires CATWAF_KERNEL_BANS=1 in .env, root, nftables, and a one-time firewall rule you add yourself (catwaf kernel-bans print-rules). Host installs only. |
+| [`ddos`](#ddos) | Under-attack switch: challenges every visitor (JavaScript proof), shortens cached verdicts to seconds, and keeps canary/edge/kernel enforcement at their most responsive. Connection timeouts live under Connections. |
+| [`siem`](#siem) | Append every blocked request as JSON lines to data/siem.jsonl (rotated) and optionally POST batches to an HTTP collector. |
+| [`alert_dispatch`](#alert_dispatch) | Actually send the alerts configured on the Alerts page: attack spikes, new bans and engine changes delivered to your webhooks or Telegram. |
 
 ## access
 
@@ -670,6 +676,7 @@ Copy configuration and data off the box on a schedule.
 | `retain` | number (1–365) | `7` | Backups to keep |
 | `include_database` | switch | `true` | Include the SQLite database |
 | `include_caddyfile` | switch | `true` | Include the Caddyfile |
+| `encrypt` | switch | `false` | Encrypt backups (AES-256-CBC; requires CATWAF_BACKUP_PASSPHRASE in .env) |
 | `redact_secrets` | switch | `true` | Uses the same redaction the snapshot export already applies, so API tokens and password hashes never land in a backup file. |
 
 ## metrics
@@ -781,6 +788,82 @@ Engine choice and pool tuning. SQLite is the right answer at Free's scale.
 | `journal_mode` | choice: `WAL`, `DELETE`, `TRUNCATE`, `PERSIST`, `MEMORY` | `WAL` | SQLite journal mode |
 | `synchronous` | choice: `OFF`, `NORMAL`, `FULL`, `EXTRA` | `NORMAL` | SQLite synchronous mode |
 
+## canary
+
+**Canary auto-ban**
+
+Paths no legitimate visitor requests. Touching one is intent — probe it and the address is banned outright, before any payload is even evaluated.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | switch | `false` | Enabled |
+| `paths` | list | `/.env, /.git/config, /.git/HEAD, /.htpasswd, /.aws/credentials, /wp-config.php.bak` | Canary paths |
+| `ban_seconds` | number (300–2592000) | `86400` | Ban duration (seconds) |
+| `escalate` | switch | `true` | Escalate repeat offenders |
+
+## edge_bans
+
+**Edge ban enforcement** · advanced
+
+Render the newest active bans directly into the Caddyfile so banned addresses are dropped by Caddy itself — no forward_auth hop, no WAF evaluation, no bytes to the origin.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | switch | `false` | Enabled |
+| `max_rules` | number (50–2000) | `500` | Maximum rules rendered (newest first) |
+| `include_cidrs` | switch | `true` | Include CIDR-range bans |
+| `refresh_seconds` | number (15–600) | `30` | Refresh interval (seconds) |
+
+## kernel_bans
+
+**Kernel-level drops** · advanced
+
+Mirror active bans into an nftables set so banned addresses die at SYN, before Caddy. Requires CATWAF_KERNEL_BANS=1 in .env, root, nftables, and a one-time firewall rule you add yourself (catwaf kernel-bans print-rules). Host installs only.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | switch | `false` | Enabled |
+| `max_entries` | number (100–262144) | `65536` | Maximum set entries |
+
+## ddos
+
+**Anti-DDoS**
+
+Under-attack switch: challenges every visitor (JavaScript proof), shortens cached verdicts to seconds, and keeps canary/edge/kernel enforcement at their most responsive. Connection timeouts live under Connections.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `emergency` | switch | `false` | UNDER-ATTACK MODE |
+| `verdict_ttl_seconds` | number (1–20) | `2` | Verdict cache TTL while under attack (seconds) |
+
+## siem
+
+**SIEM event stream** · advanced
+
+Append every blocked request as JSON lines to data/siem.jsonl (rotated) and optionally POST batches to an HTTP collector.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | switch | `false` | Enabled |
+| `include_allowed` | switch | `false` | Include allowed requests too |
+| `http_url` | str | _(unset)_ | Optional HTTP collector URL (POSTs JSONL) |
+| `batch_max` | number (50–5000) | `500` | Max events per poll/batch |
+
+## alert_dispatch
+
+**Alert delivery** · contains secrets
+
+Actually send the alerts configured on the Alerts page: attack spikes, new bans and engine changes delivered to your webhooks or Telegram.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | switch | `false` | Enabled |
+| `spike_window_min` | number (1–60) | `5` | Spike window (minutes) |
+| `cooldown_min` | number (1–1440) | `15` | Per-alert cooldown (minutes) |
+| `on_spike` | switch | `true` | Alert on blocked-request spikes |
+| `on_new_ban` | switch | `false` | Alert on every new automatic ban |
+| `on_engine_change` | switch | `true` | Alert on engine/mode changes |
+
 ---
 
-40 groups, 303 settings.
+46 groups, 326 settings.

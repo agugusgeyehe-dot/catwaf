@@ -47,6 +47,17 @@ services:
       - caddy
     security_opt:
       - no-new-privileges:true
+    # node user on high port :8000 needs no capabilities — run with none.
+    cap_drop:
+      - ALL
+    # Keep scratch files out of the container's writable layer.
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     build:
@@ -75,6 +86,18 @@ services:
       - test-app
     security_opt:
       - no-new-privileges:true
+    # Serves :80/:443, so bind-to-privileged-port is the one capability kept;
+    # everything else is dropped. NOT read-only — Caddy writes certs/config
+    # to its volumes.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # The protected website's origin. Locally this is an intentionally
   # vulnerable demo app used to show that the WAF actually blocks; in a real

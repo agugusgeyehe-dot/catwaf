@@ -4,6 +4,10 @@ function escapeForDirective(str) {
     .replace(/\\/g, '\\\\')
     .replace(/`/g, "'")
     .replace(/"/g, "'")
+    // The result lands inside Coraza's single-quoted action values
+    // (msg:'...'), so a literal quote must be escaped or it terminates the
+    // token and lets extra actions be injected into the rule.
+    .replace(/'/g, "\\'")
     .replace(/[\r\n]/g, ' ')
 }
 
@@ -17,12 +21,32 @@ function isValidCaddyPath(p) {
 const IPV4_OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)'
 const IPV4_RE = new RegExp(`^${IPV4_OCTET}(\\.${IPV4_OCTET}){3}$`)
 const IPV4_CIDR_RE = new RegExp(`^${IPV4_OCTET}(\\.${IPV4_OCTET}){3}/(\\d|[12]\\d|3[0-2])$`)
-const IPV6_RE = /^[0-9a-fA-F:]+:[0-9a-fA-F:]*$/
-const IPV6_CIDR_RE = /^[0-9a-fA-F:]+:[0-9a-fA-F:]*\/\d{1,3}$/
+// Fast charset prefilters only — every IPv6 candidate is additionally parsed
+// with ipv6ToBigInt() below. The regexes alone accepted junk like ":::" and
+// prefixes such as /999, which then persisted to state and permanently broke
+// every later Caddyfile render (the config pipeline froze until the entry
+// was removed by hand).
+const IPV6_CHARS_RE = /^[0-9a-fA-F:]+$/
+const IPV6_CIDR_CHARS_RE = /^[0-9a-fA-F:]+\/\d{1,3}$/
+
+function isValidIpv6(text) {
+  if (!text.includes(':')) return false
+  return ipv6ToBigInt(text) !== null
+}
 
 function isValidIpOrCidr(ip) {
   if (typeof ip !== 'string' || ip.length === 0 || ip.length > 64) return false
-  return IPV4_RE.test(ip) || IPV4_CIDR_RE.test(ip) || IPV6_RE.test(ip) || IPV6_CIDR_RE.test(ip)
+  if (IPV4_RE.test(ip) || IPV4_CIDR_RE.test(ip)) return true
+
+  const slash = ip.indexOf('/')
+  if (slash === -1) {
+    if (!IPV6_CHARS_RE.test(ip)) return false
+    return isValidIpv6(ip)
+  }
+  if (!IPV6_CIDR_CHARS_RE.test(ip)) return false
+  const bits = Number(ip.slice(slash + 1))
+  if (!Number.isInteger(bits) || bits < 0 || bits > 128) return false
+  return isValidIpv6(ip.slice(0, slash))
 }
 
 
@@ -36,6 +60,32 @@ function ipv4ToInt(ip) {
   return ip.split('.').reduce((acc, o) => ((acc << 8) >>> 0) + Number(o), 0) >>> 0
 }
 
+const IPV6_GROUP_RE = /^[0-9a-fA-F]{1,4}$/
+
+// Keys that must never be copied between plain objects: JSON parsed from
+// SQLite can carry "__proto__" as an own property, and any later
+// Object.assign/spread-based consumer turns it into a real prototype change.
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+function stripUnsafeKeys(value) {
+  if (Array.isArray(value)) return value.map(stripUnsafeKeys)
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(value)) {
+      if (UNSAFE_MERGE_KEYS.has(k)) continue
+      out[k] = stripUnsafeKeys(v)
+    }
+    return out
+  }
+  return value
+}
+
+function ipv6GroupsValid(text) {
+  // A non-empty side of "::" must be one-or-more clean hex groups; this
+  // rejects stray colons like "::::" or ":::" while accepting "" and "::".
+  return text === '' || text.split(':').every(g => IPV6_GROUP_RE.test(g))
+}
+
 function ipv6ToBigInt(ip) {
   if (typeof ip !== 'string' || !ip.includes(':')) return null
   let head = ip, tail = ''
@@ -44,6 +94,9 @@ function ipv6ToBigInt(ip) {
     const parts = ip.split('::')
     if (parts.length > 2) return null
     head = parts[0]; tail = parts[1]
+    // Both sides must be well-formed group sequences (":::" has an empty
+    // group hiding in its tail).
+    if (!ipv6GroupsValid(head) || !ipv6GroupsValid(tail)) return null
   }
   const h = head ? head.split(':').filter(Boolean) : []
   const t = tail ? tail.split(':').filter(Boolean) : []
@@ -53,7 +106,7 @@ function ipv6ToBigInt(ip) {
   if (groups.length !== 8) return null
   let n = 0n
   for (const g of groups) {
-    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null
+    if (!IPV6_GROUP_RE.test(g)) return null
     n = (n << 16n) + BigInt(parseInt(g, 16))
   }
   return n
@@ -190,6 +243,14 @@ function validateWafState(incoming) {
         else clean.allowed_methods = value
         break
       }
+      case 'disabled_rules': {
+        // CRS rule ids the operator disabled — digits only, matching what
+        // rules.js writes and caddy.js renders.
+        const bad = Array.isArray(value) ? value.filter(v => !/^\d{3,7}$/.test(String(v))) : null
+        if (!Array.isArray(value) || bad.length) errors.push('disabled_rules must be an array of numeric rule ids')
+        else clean.disabled_rules = value
+        break
+      }
       case 'engine': {
         if (!VALID_ENGINE_MODES.has(value)) errors.push(`engine must be one of ${[...VALID_ENGINE_MODES].join(', ')}`)
         else clean.engine = value
@@ -250,5 +311,6 @@ module.exports = {
   isValidCustomRule, isValidExclusion,
   isValidMethodList, isValidUserAgentList,
   validateWafState,
+  stripUnsafeKeys,
   ALLOWED_VARIABLES, ALLOWED_OPERATORS, ALLOWED_ACTIONS, ALLOWED_PHASES,
 }

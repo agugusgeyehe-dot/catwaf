@@ -15,6 +15,53 @@ function expiryLabel(ban) {
   return <Badge color="orange">expires {relativeTime(ban.expires_at)}</Badge>
 }
 
+function EnforcementStatusCard() {
+  const [status, setStatus] = useState(null)
+
+  useEffect(() => {
+    api.get('/protect/status').then(setStatus).catch(() => setStatus(null))
+  }, [])
+
+  if (!status) return null
+
+  const edge = status.edge_bans || {}
+  const kernel = status.kernel_bans
+
+  return (
+    <div className="card">
+      <div className="section-title">Edge & kernel enforcement</div>
+      <div className="flex flex-wrap gap-1.5 items-center">
+        {status.ddos?.emergency
+          ? <Badge color="red">UNDER-ATTACK MODE ON</Badge>
+          : <Badge color="muted">under-attack mode off</Badge>}
+        <Badge color={status.canary?.enabled ? 'green' : 'muted'}>
+          canary {status.canary?.enabled ? 'enabled' : 'off'}
+        </Badge>
+        {edge.enabled ? (
+          <>
+            <Badge color="green">edge bans enabled</Badge>
+            <span className="text-xs text-cat-text">{edge.rendered ?? 0} IPs dropped at the edge</span>
+          </>
+        ) : (
+          <Badge color="muted">edge bans off</Badge>
+        )}
+        {!kernel ? (
+          <Badge color="muted">kernel drops unavailable</Badge>
+        ) : kernel.preflight_ok ? (
+          <>
+            <Badge color={kernel.enabled ? 'green' : 'muted'}>kernel drops {kernel.enabled ? 'enabled' : 'off'}</Badge>
+            <span className="text-xs text-cat-text">{kernel.entries ?? 0} entries mirrored into nftables</span>
+          </>
+        ) : (
+          <span className="text-xs" style={{ color: '#f87171' }}>
+            {(kernel.problems || []).join(' · ') || 'preflight failed'}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function BansPage() {
   const { toast, show, hide } = useToast()
   const [data, setData] = useState(null)
@@ -57,6 +104,8 @@ export function BansPage() {
         title="Active bans"
         subtitle="Every address CatWAF is currently refusing, whichever feature decided it"
       />
+
+      <EnforcementStatusCard />
 
       <Caveat tone="info" title="This list is temporary and automatic — your IP blocklist is not">
         <p>

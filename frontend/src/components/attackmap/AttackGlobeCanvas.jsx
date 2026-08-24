@@ -4,12 +4,15 @@ import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { toSphere, toFlat, easeInOutCubic, SPHERE_R } from './geo3d.js'
 
+// Attack dots are small glowing points in the red family — never large
+// geometry, never dark-on-dark. Severity shifts the hue slightly, not the
+// importance: everything flashes.
 const SEVERITY_COLOR = {
-  emergency: '#f25c5c', alert: '#f25c5c', critical: '#f25c5c',
-  error: '#f59e0b', warning: '#eab308',
-  notice: '#7c8db0', info: '#7c8db0', debug: '#7c8db0',
+  emergency: '#ff3b3b', alert: '#ff3b3b', critical: '#ff4d4d',
+  error: '#ff7043', warning: '#ffa62b',
+  notice: '#ff8fa3', info: '#ff8fa3', debug: '#ff8fa3',
 }
-function colorFor(sev) { return SEVERITY_COLOR[sev] || '#5c6577' }
+function colorFor(sev) { return SEVERITY_COLOR[sev] || '#ff6b6b' }
 
 function makeDotTexture() {
   const size = 64
@@ -77,63 +80,107 @@ function LandPoints({ landDots, progressRef, motionOff, dotTexture }) {
   )
 }
 
-function AttackMarkers({ points, progressRef, selected, onSelect, motionOff, markerCap = 300 }) {
+// Attack markers: ONE Points cloud of small soft sprites. Each dot pulses
+// its own red — brightness oscillates per-point with a random phase, so an
+// active region shimmers instead of one blob throbbing. Size grows only
+// slightly with request count and is hard-capped: no more giant spheres.
+function AttackMarkers({ points, progressRef, selected, onSelect, onHover, motionOff, dotTexture, markerCap = 300 }) {
   const ref = useRef()
-  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const { camera, gl } = useThree()
   const capped = useMemo(() => points.slice(0, markerCap), [points, markerCap])
-  const geo = useMemo(() => new THREE.SphereGeometry(1, 12, 12), [])
-  const colorArr = useMemo(() => {
-    const arr = new Float32Array(capped.length * 3)
+  const count = capped.length
+
+  const { positions, colors, phases } = useMemo(() => {
+    const positions = new Float32Array(count * 3)
+    const colors = new Float32Array(count * 3)
+    const phases = new Float32Array(count)
+    const tmp = new THREE.Color()
     capped.forEach((p, i) => {
-      const c = new THREE.Color(colorFor(p.max_severity))
-      arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b
+      positions.set(toSphere(p.lon, p.lat, SPHERE_R * 1.012), i * 3)
+      tmp.set(colorFor(p.max_severity))
+      colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b
+      phases[i] = Math.random() * Math.PI * 2
     })
-    return arr
+    return { positions, colors, phases }
   }, [capped])
 
   const flatPos = useMemo(() => capped.map(p => toFlat(p.lon, p.lat)), [capped])
-  const spherePos = useMemo(() => capped.map(p => toSphere(p.lon, p.lat, SPHERE_R * 1.01)), [capped])
+  const spherePos = useMemo(() => capped.map(p => toSphere(p.lon, p.lat, SPHERE_R * 1.012)), [capped])
 
-  useEffect(() => {
-    if (!ref.current) return
-    ref.current.instanceColor = new THREE.InstancedBufferAttribute(colorArr, 3)
-    ref.current.instanceColor.needsUpdate = true
-  }, [colorArr])
-
-  const pulseT = useRef(0)
+  // Per-frame: position morph (2D↔3D) + red flash. Flash is applied to the
+  // color attribute so each dot can beat on its own clock.
+  const flashT = useRef(0)
+  const baseColors = useMemo(() => colors.slice(), [colors])
   useFrame((_, delta) => {
     if (!ref.current) return
     const t = easeInOutCubic(progressRef.current.value)
-    if (!motionOff) pulseT.current += delta
-    const pulse = motionOff ? 0 : (Math.sin(pulseT.current * 2) + 1) / 2
-    capped.forEach((p, i) => {
+    if (!motionOff) flashT.current += delta
+    const time = flashT.current
+
+    const posAttr = ref.current.geometry.attributes.position
+    const colAttr = ref.current.geometry.attributes.color
+    const selKey = selected ? `${selected.lat},${selected.lon}` : null
+
+    for (let i = 0; i < count; i++) {
       const f = flatPos[i], s = spherePos[i]
-      const x = f[0] + (s[0] - f[0]) * t
-      const y = f[1] + (s[1] - f[1]) * t
-      const z = f[2] + (s[2] - f[2]) * t
-      dummy.position.set(x, y, z)
-      const isSel = selected && selected.lat === p.lat && selected.lon === p.lon
-      const base = 0.045 + Math.min(Math.log2(p.count + 1) * 0.028, 0.22)
-      const scale = base * (1 + pulse * 0.18) * (isSel ? 1.6 : 1)
-      dummy.scale.setScalar(scale)
-      dummy.updateMatrix()
-      ref.current.setMatrixAt(i, dummy.matrix)
-    })
-    ref.current.instanceMatrix.needsUpdate = true
+      posAttr.setXYZ(i,
+        f[0] + (s[0] - f[0]) * t,
+        f[1] + (s[1] - f[1]) * t,
+        f[2] + (s[2] - f[2]) * t)
+
+      const isSel = selKey === `${capped[i].lat},${capped[i].lon}`
+      let boost = 1
+      if (!motionOff) {
+        // Staggered heartbeat: fast enough to read as "live", slow enough to
+        // stay calm. Phase offsets de-sync neighbouring dots.
+        const wave = (Math.sin(time * 4.2 + phases[i]) + 1) / 2
+        boost = 0.42 + 0.78 * wave * wave
+      }
+      if (isSel) boost = 1.6
+      colAttr.setXYZ(i,
+        Math.min(baseColors[i * 3] * boost, 1),
+        Math.min(baseColors[i * 3 + 1] * boost, 1),
+        Math.min(baseColors[i * 3 + 2] * boost, 1))
+    }
+    posAttr.needsUpdate = true
+    colAttr.needsUpdate = true
   })
 
   return (
-    <instancedMesh
+    <points
       ref={ref}
-      args={[geo, undefined, capped.length]}
+      onPointerMove={e => {
+        e.stopPropagation()
+        const p = capped[e.index]
+        if (p && onHover) {
+          onHover(p, {
+            x: e.nativeEvent.clientX,
+            y: e.nativeEvent.clientY,
+          })
+        }
+      }}
+      onPointerOut={() => { onHover && onHover(null) }}
       onClick={e => {
         e.stopPropagation()
-        const p = capped[e.instanceId]
-        if (p) onSelect(p)
+        const p = capped[e.index]
+        if (p && onSelect) onSelect(p)
       }}
     >
-      <meshBasicMaterial vertexColors toneMapped={false} />
-    </instancedMesh>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+        <bufferAttribute attach="attributes-color" args={[colors, 3]} />
+      </bufferGeometry>
+      <pointsMaterial
+        size={0.05}
+        map={dotTexture}
+        vertexColors
+        transparent
+        opacity={0.95}
+        sizeAttenuation
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </points>
   )
 }
 
@@ -202,7 +249,7 @@ function CameraRig({ progressRef, controlsRef }) {
 }
 
 export default function AttackGlobeCanvas({
-  landDots, points, selected, onSelect, mode, autoRotate, motionOff, resetSignal, markerCap = 300,
+  landDots, points, selected, onSelect, onHover, mode, autoRotate, motionOff, resetSignal, markerCap = 300,
 }) {
   const progressRef = useRef({ value: mode === '3d' ? 1 : 0 })
   const controlsRef = useRef()
@@ -218,6 +265,7 @@ export default function AttackGlobeCanvas({
       camera={{ position: CAM_2D.pos, fov: 42 }}
       gl={{ antialias: true, alpha: true }}
       dpr={[1, 1.75]}
+      raycaster={{ params: { Points: { threshold: 0.09 } } }}
       style={{ touchAction: 'none' }}
     >
       <ambientLight intensity={1.1} />
@@ -226,7 +274,16 @@ export default function AttackGlobeCanvas({
       <Stars progressRef={progressRef} />
       <Atmosphere progressRef={progressRef} />
       <LandPoints landDots={landDots} progressRef={progressRef} motionOff={motionOff} dotTexture={dotTexture} />
-      <AttackMarkers points={points} progressRef={progressRef} selected={selected} onSelect={onSelect} motionOff={motionOff} markerCap={markerCap} />
+      <AttackMarkers
+        points={points}
+        progressRef={progressRef}
+        selected={selected}
+        onSelect={onSelect}
+        onHover={onHover}
+        motionOff={motionOff}
+        dotTexture={dotTexture}
+        markerCap={markerCap}
+      />
       <OrbitControls
         ref={controlsRef}
         enablePan={false}

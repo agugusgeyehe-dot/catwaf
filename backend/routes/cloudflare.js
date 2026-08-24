@@ -8,6 +8,7 @@ const router = express.Router()
 const auditSvc = require('../services/audit')
 const cloudflareSvc = require('../services/cloudflare')
 const caddySvc = require('../services/caddy')
+const configLock = require('../services/configLock')
 const { writeRequired } = require('../middleware/auth')
 
 const ZONE_ID_RE = /^[a-f0-9]{32}$/i
@@ -124,7 +125,9 @@ router.post('/api/cloudflare/gen-cert', writeRequired, async (req, res) => {
     })
 
     const certPath = path.join(certDir, `${zone_id}.pem`)
-    fs.writeFileSync(certPath, data.result.certificate)
+    // Private-key material must not be world-readable regardless of umask.
+    fs.writeFileSync(certPath, data.result.certificate, { mode: 0o644 })
+    try { fs.chmodSync(keyPath, 0o600) } catch {}
     auditSvc.audit(req, 'cloudflare.gen-cert', zone_id, { hostnames: hosts })
     res.json({
       message: 'Origin certificate generated and saved to data/certs/',
@@ -139,10 +142,21 @@ router.post('/api/cloudflare/lock-origin', writeRequired, async (req, res) => {
   try {
     const fs = require('fs')
     const [v4, v6] = await Promise.all([
-      fetch('https://www.cloudflare.com/ips-v4').then(r => r.text()),
-      fetch('https://www.cloudflare.com/ips-v6').then(r => r.text()),
+      fetch('https://www.cloudflare.com/ips-v4', { signal: AbortSignal.timeout(10000) }).then(r => r.text()),
+      fetch('https://www.cloudflare.com/ips-v6', { signal: AbortSignal.timeout(10000) }).then(r => r.text()),
     ])
-    const ranges = [...v4.trim().split('\n'), ...v6.trim().split('\n')].filter(Boolean)
+    // These lists come from the network and land verbatim inside a Caddy
+    // matcher. A hijacked or manipulated response containing newlines,
+    // quotes or braces would inject arbitrary Caddy directives into the
+    // live config — so every entry must be exactly an IP or CIDR, or the
+    // whole lock is refused.
+    const { isValidIpOrCidr } = require('../services/sanitize')
+    const ranges = [...v4.trim().split('\n'), ...v6.trim().split('\n')]
+      .map(l => l.trim()).filter(Boolean)
+    if (!ranges.length) return res.status(502).json({ detail: 'Cloudflare returned no IP ranges — refusing to build an empty origin lock.' })
+    if (!ranges.every(r => isValidIpOrCidr(r))) {
+      return res.status(502).json({ detail: 'Cloudflare returned a malformed IP range — refusing to write it into the Caddyfile.' })
+    }
 
     const block = [
       '# @@CATWAF_CF_LOCK_START@@',
@@ -153,6 +167,7 @@ router.post('/api/cloudflare/lock-origin', writeRequired, async (req, res) => {
       '# @@CATWAF_CF_LOCK_END@@',
     ].join('\n')
 
+    const outcome = configLock.withConfigLock(() => {
     let content = fs.readFileSync(caddySvc.CADDYFILE_PATH, 'utf8')
     if (content.includes('@@CATWAF_CF_LOCK_START@@')) {
       content = content.replace(/# @@CATWAF_CF_LOCK_START@@[\s\S]*?# @@CATWAF_CF_LOCK_END@@/, block)
@@ -173,7 +188,10 @@ router.post('/api/cloudflare/lock-origin', writeRequired, async (req, res) => {
       }
       content = content.slice(0, idx) + block + '\n' + content.slice(idx)
     }
-    fs.writeFileSync(caddySvc.CADDYFILE_PATH, content, 'utf8')
+    // The read-modify-write above and the reload below run under the same
+    // config lock every other Caddyfile writer uses, and the write itself is
+    // atomic — a concurrent CLI patch can no longer be clobbered here.
+    configLock.atomicWriteFileSync(caddySvc.CADDYFILE_PATH, content, { mode: 0o644 })
 
     const { reloaded, error: reloadErr } = caddySvc.reloadCaddy()
 
@@ -184,6 +202,8 @@ router.post('/api/cloudflare/lock-origin', writeRequired, async (req, res) => {
         : 'Caddyfile updated but reload failed — run "caddy reload" manually',
       ranges_applied: ranges.length, reloaded, reload_error: reloadErr,
     })
+    })
+    return outcome
   } catch (e) { res.status(500).json({ detail: e.message }) }
 })
 

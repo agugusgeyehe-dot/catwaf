@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 
 const secrets = require('../services/secrets')
+const configLock = require('../services/configLock')
 const JWT_SECRET = secrets.JWT_SECRET
 
 const BCRYPT_COST = 12
@@ -69,7 +70,12 @@ const USERS = new Proxy([], {
 const VALID_ROLES = ['admin', 'viewer']
 const MIN_PASSWORD_LENGTH = 8
 
+// Every mutator re-reads the committed user list inside the lock: a
+// `catwaf user add` in the CLI and a dashboard role change can no longer
+// whole-blob-overwrite each other.
 function addUser({ username, password, role = 'viewer' }) {
+  return configLock.withConfigLock(() => {
+  _usersReadAt = 0 // force the freshest read inside the lock
   refreshUsers()
   if (_users.find(u => u.username === username)) throw new Error(`User "${username}" already exists`)
   if (!VALID_ROLES.includes(role)) throw new Error(`Role must be one of: ${VALID_ROLES.join(', ')}`)
@@ -78,8 +84,11 @@ function addUser({ username, password, role = 'viewer' }) {
   _users = [..._users, user]
   saveUsers(_users)
   return user
+  })
 }
 function setPassword(username, password) {
+  return configLock.withConfigLock(() => {
+  _usersReadAt = 0
   refreshUsers()
   const u = _users.find(x => x.username === username)
   if (!u) throw new Error(`User "${username}" not found`)
@@ -99,6 +108,7 @@ function setPassword(username, password) {
   // and the tokens_valid_after stamp above is the authoritative control.
   try { require('../services/session').closeAllFor(username) } catch {}
   return u
+  })
 }
 
 function listUsers() {
@@ -112,6 +122,8 @@ function findUser(username) {
 }
 
 function removeUser(username) {
+  return configLock.withConfigLock(() => {
+  _usersReadAt = 0
   refreshUsers()
   const target = _users.find(u => u.username === username)
   if (!target) throw new Error(`User "${username}" not found`)
@@ -121,9 +133,12 @@ function removeUser(username) {
   _users = _users.filter(u => u.username !== username)
   saveUsers(_users)
   return { username }
+  })
 }
 
 function setRole(username, role) {
+  return configLock.withConfigLock(() => {
+  _usersReadAt = 0
   refreshUsers()
   if (!VALID_ROLES.includes(role)) throw new Error(`Role must be one of: ${VALID_ROLES.join(', ')}`)
   const u = _users.find(x => x.username === username)
@@ -134,6 +149,7 @@ function setRole(username, role) {
   u.role = role
   saveUsers(_users)
   return { username, role }
+  })
 }
 
 function verifyPassword(username, password) {
@@ -205,6 +221,15 @@ function attemptKey(req) {
   return `${req.ip}:${username.toLowerCase().slice(0, 64)}`
 }
 
+// Second counter keyed on the username alone. The per-ip:user key above can
+// be rotated at will by a client that controls its X-Forwarded-For (direct
+// exposure, TRUST_PROXY_HOPS=1), so without this a brute-force campaign
+// against one account faces no cumulative limit. NAT offices share the
+// budget below — 30 password tries per account per 5 minutes is far more
+// than any human needs.
+const LOGIN_MAX_ATTEMPTS_PER_USER = 30
+const USER_ATTEMPTS = new Map()
+
 function loginRateLimit(req, res, next) {
   const key = attemptKey(req)
   const now = Date.now()
@@ -219,13 +244,40 @@ function loginRateLimit(req, res, next) {
   } else {
     LOGIN_ATTEMPTS.set(key, { count: 1, firstAttemptAt: now })
   }
+
+  const username = typeof req.body?.username === 'string' ? req.body.username.toLowerCase().slice(0, 64) : null
+  if (username) {
+    const userEntry = USER_ATTEMPTS.get(username)
+    if (userEntry && now - userEntry.firstAttemptAt < LOGIN_WINDOW_MS) {
+      if (userEntry.count >= LOGIN_MAX_ATTEMPTS_PER_USER) {
+        res.set('Retry-After', String(Math.ceil((LOGIN_WINDOW_MS - (now - userEntry.firstAttemptAt)) / 1000)))
+        return res.status(429).json({ detail: 'Too many login attempts for this account. Try again later.' })
+      }
+      userEntry.count++
+    } else {
+      USER_ATTEMPTS.set(username, { count: 1, firstAttemptAt: now })
+    }
+  }
+
   if (LOGIN_ATTEMPTS.size > 5000) {
     for (const [k, v] of LOGIN_ATTEMPTS) if (now - v.firstAttemptAt > LOGIN_WINDOW_MS) LOGIN_ATTEMPTS.delete(k)
+  }
+  // Hard ceiling independent of age: a flood of unique ip:username keys
+  // within one window must not grow the map without bound just because its
+  // entries have not expired yet.
+  while (LOGIN_ATTEMPTS.size > 10000) {
+    LOGIN_ATTEMPTS.delete(LOGIN_ATTEMPTS.keys().next().value)
+  }
+  while (USER_ATTEMPTS.size > 5000) {
+    for (const [k, v] of USER_ATTEMPTS) if (now - v.firstAttemptAt > LOGIN_WINDOW_MS) USER_ATTEMPTS.delete(k)
+    while (USER_ATTEMPTS.size > 5000) USER_ATTEMPTS.delete(USER_ATTEMPTS.keys().next().value)
   }
   next()
 }
 function clearLoginAttempts(req) {
   LOGIN_ATTEMPTS.delete(attemptKey(req))
+  const username = typeof req.body?.username === 'string' ? req.body.username.toLowerCase().slice(0, 64) : null
+  if (username) USER_ATTEMPTS.delete(username)
 }
 
 module.exports = { JWT_SECRET, JWT_ISSUER, JWT_AUDIENCE, USERS, softAuth, authRequired, writeRequired, loginRateLimit, clearLoginAttempts, addUser, setPassword, needsBootstrap, listUsers, findUser, removeUser, setRole, verifyPassword, VALID_ROLES, BCRYPT_COST, MIN_PASSWORD_LENGTH }

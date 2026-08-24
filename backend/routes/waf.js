@@ -11,9 +11,8 @@ router.get('/api/waf/engine', (req, res) => res.json({ mode: state.WAF.engine })
 router.post('/api/waf/engine', writeRequired, (req, res) => {
   const { mode } = req.body || {}
   if (!['On','DetectionOnly','Off'].includes(mode)) return res.status(400).json({ detail: 'Invalid mode' })
-  state.WAF.engine = mode; state.saveWAF(true)
-  const caddy = caddySvc.applyToCaddy('engine.set', req)
-  res.json({ mode, message: `Engine set to ${mode}`, caddy_reloaded: caddy.reloaded, caddy_error: caddy.error })
+  const { sync } = state.updateWAF(w => { w.engine = mode }, { label: 'engine.set', req, syncCaddy: true })
+  res.json({ mode, message: `Engine set to ${mode}`, caddy_reloaded: sync.reloaded, caddy_error: sync.error })
 })
 
 router.get('/api/waf/paranoia', (req, res) => {
@@ -29,11 +28,11 @@ router.post('/api/waf/paranoia', writeRequired, (req, res) => {
     if (![1,2,3,4].includes(executing_level)) return res.status(400).json({ detail: 'Executing PL must be 1-4' })
     if (executing_level < level) return res.status(400).json({ detail: 'Executing PL must be >= blocking PL' })
   }
-  state.WAF.paranoia_level = level
-  if (executing_level != null) state.WAF.executing_paranoia_level = executing_level
-  state.saveWAF(true)
-  const caddy = caddySvc.applyToCaddy('paranoia.set', req)
-  res.json({ blocking_paranoia_level: level, executing_paranoia_level: state.WAF.executing_paranoia_level, message: `PL${level}`, caddy_reloaded: caddy.reloaded, caddy_error: caddy.error })
+  const { sync } = state.updateWAF(w => {
+    w.paranoia_level = level
+    if (executing_level != null) w.executing_paranoia_level = executing_level
+  }, { label: 'paranoia.set', req, syncCaddy: true })
+  res.json({ blocking_paranoia_level: level, executing_paranoia_level: state.WAF.executing_paranoia_level, message: `PL${level}`, caddy_reloaded: sync.reloaded, caddy_error: sync.error })
 })
 
 router.get('/api/waf/anomaly', (req, res) => res.json({ inbound_threshold: state.WAF.inbound_anomaly_threshold, outbound_threshold: state.WAF.outbound_anomaly_threshold, scoring_breakdown: { critical: 5, error: 4, warning: 3, notice: 2 }, note: 'Requests scoring >= inbound threshold are blocked.' }))
@@ -45,10 +44,11 @@ router.post('/api/waf/anomaly', writeRequired, (req, res) => {
   if (!isThreshold(inbound) || !isThreshold(outbound)) {
     return res.status(400).json({ detail: `Thresholds must be whole numbers between 1 and ${MAX_ANOMALY_THRESHOLD}` })
   }
-  state.WAF.inbound_anomaly_threshold = inbound; state.WAF.outbound_anomaly_threshold = outbound
-  state.saveWAF(true)
-  const caddy = caddySvc.applyToCaddy('anomaly.set', req)
-  res.json({ inbound, outbound, message: 'Thresholds updated', caddy_reloaded: caddy.reloaded })
+  const { sync } = state.updateWAF(w => {
+    w.inbound_anomaly_threshold = inbound
+    w.outbound_anomaly_threshold = outbound
+  }, { label: 'anomaly.set', req, syncCaddy: true })
+  res.json({ inbound, outbound, message: 'Thresholds updated', caddy_reloaded: sync.reloaded })
 })
 
 
@@ -93,10 +93,10 @@ function applySettingsUpdate(req, res, { reloadCaddy }) {
     const err = validateSetting(k, v)
     if (err) return res.status(400).json({ detail: err })
   }
-  for (const [k, v] of Object.entries(body)) state.WAF[k] = v
-  state.saveWAF(true); auditSvc.audit(req, 'settings.update', '', body)
+  state.updateWAF(w => { for (const [k, v] of Object.entries(body)) w[k] = v },
+    { label: reloadCaddy ? 'settings.post' : 'settings.patch', req, syncCaddy: reloadCaddy })
+  auditSvc.audit(req, 'settings.update', '', body)
   const o = {}; for (const k of SETTING_KEYS) o[k] = state.WAF[k]
-  if (reloadCaddy) caddySvc.applyToCaddy('settings.post', req)
   res.json({ message: 'Updated', settings: o })
 }
 
@@ -144,8 +144,7 @@ router.post('/api/performance-mode', writeRequired, (req, res) => {
   }
   const preset = PERFORMANCE_PRESETS[mode]
   const { label, ...settings } = preset
-  Object.assign(state.WAF, settings)
-  state.saveWAF(true)
+  state.updateWAF(w => { Object.assign(w, settings) }, { label: 'performance-mode.apply', req, syncCaddy: false })
   auditSvc.audit(req, 'performance-mode.apply', mode)
   res.json({ message: `Applied ${label} mode`, applied: settings })
 })

@@ -66,7 +66,7 @@ async function query(ip, opts = {}) {
     const headers = { Accept: 'application/json' }
     if (cfg.api_key) headers[cfg.header_name || 'X-Api-Key'] = cfg.api_key
     try {
-      const { response } = await netGuard.guardedFetch(endpointFor(cfg, addr), { timeoutMs: cfg.timeout_ms, headers })
+      const { response } = await netGuard.guardedFetch(endpointFor(cfg, addr), { timeoutMs: cfg.timeout_ms, headers, allowLoopback: true })
       if (!response.ok) return { decisions: [], error: `feed returned ${response.status}` }
       const payload = await response.json().catch(() => null)
       return { decisions: parseDecisions(payload) }
@@ -116,7 +116,7 @@ async function testConnection() {
   try {
     const headers = { Accept: 'application/json' }
     if (cfg.api_key) headers[cfg.header_name || 'X-Api-Key'] = cfg.api_key
-    const { response } = await netGuard.guardedFetch(endpointFor(cfg, '127.0.0.2'), { timeoutMs: cfg.timeout_ms, headers })
+    const { response } = await netGuard.guardedFetch(endpointFor(cfg, '127.0.0.2'), { timeoutMs: cfg.timeout_ms, headers, allowLoopback: true })
     return {
       ok: response.ok,
       status: response.status,

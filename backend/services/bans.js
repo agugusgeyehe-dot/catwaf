@@ -33,7 +33,21 @@ const SOURCES = {
   rdns: 'Reverse DNS matches a blocked suffix',
   tools_fingerprint: 'Matched a known scanner tool fingerprint (User-Agent + header shape)',
   upload_malware: 'Uploaded a file the malware scanner rejected',
+  canary: 'Probed a honeypot path that no legitimate visitor requests',
 }
+
+// Change listeners: edge-ban rendering, kernel sync and alert delivery all
+// want to react when the active-ban set changes. Listeners are synchronous
+// best-effort — a throwing listener must never fail the ban itself.
+const changeListeners = new Set()
+function notifyChange(kind, detail = {}) {
+  for (const fn of changeListeners) {
+    try { fn(kind, detail) } catch (e) {
+      try { require('./logger').child('bans').warn('ban change listener failed', { error: e.message }) } catch {}
+    }
+  }
+}
+function onBanChange(fn) { changeListeners.add(fn); return () => changeListeners.delete(fn) }
 
 const now = () => new Date().toISOString()
 
@@ -93,10 +107,16 @@ function ban({ target, source = 'manual', reason = '', seconds = null, ruleId = 
     // Extend rather than duplicate: the same source re-reporting an address
     // should push the expiry out, not create a second row the operator then
     // has to lift twice.
-    const keepLonger = !expiresAt || (existing.expires_at && new Date(existing.expires_at) > new Date(expiresAt))
+    // A NULL existing expiry means "permanent" — it must always win. The
+    // old expression treated null as falsy and let a temporary re-report
+    // overwrite a permanent ban with its own shorter expiry.
+    const existingPermanent = !existing.expires_at
+    const keepLonger = !expiresAt || existingPermanent ||
+      (existing.expires_at && new Date(existing.expires_at) > new Date(expiresAt))
     conn().prepare('UPDATE active_bans SET hits = hits + 1, reason = ?, expires_at = ?, meta = ? WHERE id = ?')
       .run(reason || existing.reason, keepLonger ? existing.expires_at : expiresAt, JSON.stringify(meta), existing.id)
     if (isRange) invalidateCache()
+    notifyChange('extend', { target: clean, source })
     return { ok: true, extended: true, ban: get(existing.id) }
   }
 
@@ -105,6 +125,7 @@ function ban({ target, source = 'manual', reason = '', seconds = null, ruleId = 
     INSERT INTO active_bans (id, target, source, reason, rule_id, created_at, expires_at, hits, meta)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
   `).run(id, clean, source, reason || SOURCES[source], ruleId, now(), expiresAt, JSON.stringify(meta))
+  notifyChange('add', { target: clean, source })
 
   conn().prepare(`
     INSERT INTO ban_history (target, count, last_ban, last_source) VALUES (?, 1, ?, ?)
@@ -124,6 +145,7 @@ function lift(id, { by = 'system' } = {}) {
   if (!existing) return { ok: false, error: 'No such ban' }
   conn().prepare('DELETE FROM active_bans WHERE id = ?').run(id)
   if (existing.target.includes('/')) invalidateCache()
+  notifyChange('lift', { target: existing.target, source: existing.source })
   return { ok: true, lifted: existing, by }
 }
 
@@ -133,6 +155,7 @@ function liftTarget(target, { source = null } = {}) {
     ? conn().prepare('DELETE FROM active_bans WHERE target = ? AND source = ? RETURNING id').all(clean, source)
     : conn().prepare('DELETE FROM active_bans WHERE target = ? RETURNING id').all(clean)
   if (rows.length && clean.includes('/')) invalidateCache()
+  if (rows.length) notifyChange('lift', { target: clean, source })
   return { ok: true, removed: rows.length }
 }
 
@@ -180,9 +203,19 @@ function list({ source = null, limit = 200, offset = 0, includeExpired = false }
   return rows.map(rowToBan)
 }
 
+// Newest-first flat list of what is currently refused — the exact input the
+// edge renderer and the kernel bridge consume.
+function listActiveTargets({ limit = 1000 } = {}) {
+  // Permanent bans sort first: under heavy churn a flood of short temporary
+  // bans must never push a permanent (usually manual, worst-offender) ban
+  // out of the rendered edge/kernel lists.
+  const rows = conn().prepare(`SELECT target FROM active_bans WHERE expires_at IS NULL OR expires_at > ? ORDER BY (expires_at IS NULL) DESC, created_at DESC LIMIT ?`).all(now(), Math.min(limit, 100_000))
+  return rows.map(r => r.target)
+}
+
 function purgeExpired() {
   const removed = conn().prepare('DELETE FROM active_bans WHERE expires_at IS NOT NULL AND expires_at <= ? RETURNING id').all(now())
-  if (removed.length) invalidateCache()
+  if (removed.length) { invalidateCache(); notifyChange('expire', { removed }) }
   return { removed: removed.length, changed: removed.length > 0 }
 }
 
@@ -207,10 +240,11 @@ function stats() {
 function clearAll() {
   conn().exec('DELETE FROM active_bans')
   invalidateCache()
+  notifyChange('clear', {})
   return { ok: true }
 }
 
 module.exports = {
   SOURCES, ban, get, lift, liftTarget, check, list, purgeExpired, stats,
-  historyFor, clearAll, invalidateCache,
+  historyFor, clearAll, invalidateCache, onBanChange, notifyChange, listActiveTargets,
 }

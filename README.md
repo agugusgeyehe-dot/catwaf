@@ -20,6 +20,16 @@ Built on a native Go WAF engine. Not a ModSecurity wrapper.
 
 CatWAF sits in front of your website and inspects every request through Coraza — a native Go WAF engine running the OWASP Core Rule Set — then gives you a control panel for it. Turn protection on, tune how strict it is, block bad IPs and countries, and see what's actually hitting your site.
 
+### What stops the bad guys
+
+- **Coraza WAF + OWASP CRS** at the edge, tuned from a dashboard instead of SecRule files
+- **Canary auto-ban** — probing `/.env` or `/.git` is an instant, escalating ban
+- **Edge ban enforcement** — banned addresses are dropped by Caddy itself, no hop to CatWAF
+- **Kernel-level drops (opt-in)** — mirror bans into nftables so they die at SYN
+- **Challenge gate + tool fingerprinting + DNSBL/community lists/ASN/rDNS** — layered reputation before payloads are evaluated
+- **Under-attack mode** — one switch that challenges every visitor and shortens verdict caching
+- **Alerts that actually fire** — spikes, new bans and engine changes delivered to Slack/Discord/Telegram/webhooks
+
 **CatWAF Free is the website-owner edition:** one site, one admin, no fleet management or SOC tooling. Everything here is meant to be usable without being a security engineer.
 
 ## Two editions
@@ -246,11 +256,13 @@ Control panels regenerate their own vhosts, so a file written underneath them wo
 
 **Access control** — IP allow/block lists with expiry, country-level geo blocking, method allowlists, basic auth, client certificates, and a switch to refuse any request whose `Host` isn't one of yours — the mechanical fix for [origin exposure](docs/protection.md#why-a-feature-might-not-be-doing-anything).
 
+**Enforcement tiers** — Stopping a client happens at whichever layer is cheapest: a canary list (touching `/.env` or `/.git` is intent, and earns an instant escalating ban), the Caddyfile itself (banned addresses rendered as an `abort` matcher — no hop, no evaluation), optionally an nftables set for drops at SYN, and finally the challenge gate. An UNDER-ATTACK MODE switch challenges every visitor and shortens cached verdicts when the bad hours arrive.
+
 **Client reputation** — The rule engine asks *is this request malicious?*; this layer asks *should this client be here at all?* A challenge gate (cookie, JavaScript proof-of-work, a self-hosted captcha, or reCAPTCHA/hCaptcha/Turnstile/mCaptcha), behavioural banning, ASN and forward-confirmed reverse-DNS rules, DNSBLs and subscribed community blocklists. Every feature that stops an address writes to [one ban store](docs/protection.md#active-bans), so "why is this visitor blocked" has a single answer. All of it is off by default. See [the protection guide](docs/protection.md).
 
-**Configuration** — Around 300 settings across 40 groups — TLS and certificates, reverse-proxy behaviour, response headers, CORS, compression, caching, generated `robots.txt` and `security.txt` — reachable from the dashboard, `catwaf settings`, or the API, all through the same validation. Every change can be [previewed as a Caddyfile diff](docs/cli.md#catwaf-settings) before it applies, and is validated by Caddy and rolled back if it wouldn't load. See the [settings reference](docs/settings.md).
+**Configuration** — Around 326 settings across 46 groups — TLS and certificates, reverse-proxy behaviour, response headers, CORS, compression, caching, generated `robots.txt` and `security.txt` — reachable from the dashboard, `catwaf settings`, or the API, all through the same validation. Every change can be [previewed as a Caddyfile diff](docs/cli.md#catwaf-settings) before it applies, and is validated by Caddy and rolled back if it wouldn't load. See the [settings reference](docs/settings.md).
 
-**Operations** — One scheduler for every timed task, backups, configuration templates, CSV and printable reports, a [Prometheus endpoint](docs/metrics.md), and two-factor admin login. `catwaf doctor` reports what the installed Caddy build can actually do, and names anything you've switched on that couldn't be rendered because of a missing module — so an enabled feature is never a silent no-op.
+**Operations** — One scheduler for every timed task, backups (optionally AES-256-CBC encrypted at rest) with a real restore path, configuration templates, CSV and printable reports, a [Prometheus endpoint](docs/metrics.md), a JSONL event stream for your SIEM, `catwaf update` against GitHub releases, and two-factor admin login. `catwaf doctor` reports what the installed Caddy build can actually do, and names anything you've switched on that couldn't be rendered because of a missing module — so an enabled feature is never a silent no-op.
 
 **Sensitive files** — Five graduated levels (SFL 0–4) that block access to config files, backups, and version-control directories, plus a scanner that walks your real webroot and shows what's publicly reachable.
 
@@ -258,9 +270,9 @@ Control panels regenerate their own vhosts, so a file written underneath them wo
 
 **Cloudflare** — A guided wizard to verify your zone, turn proxying on, enforce strict SSL, and lock your origin so traffic can't bypass Cloudflare.
 
-**Visibility** *(Full)* — A dashboard of real traffic, a security score with specific recommendations, an origin exposure scanner, setup diagnostics, and alerts via Discord, Slack, Telegram, or a webhook.
+**Visibility** *(Full)* — A dashboard of real traffic, a security score with specific recommendations, an origin exposure scanner, setup diagnostics, and alerts via Discord, Slack, Telegram, or a webhook — spikes, new bans and engine changes are delivered automatically, not just testable.
 
-**Attack Map** *(Full)* — A 2D map or 3D globe of where blocked requests actually came from, with per-location attack breakdowns and a live event feed. It is built from real GeoIP data attached to each blocked request at ingest. Requests whose source cannot be geolocated — private addresses, and anything the database has no entry for — are not plotted, and the map says it has no data rather than inventing points to fill space.
+**Attack Map** *(Full)* — A 2D map or 3D globe of where blocked requests actually came from, with per-location attack breakdowns, hover tooltips showing totals across 24h/5d/7d/30d, and a live event feed. It is built from real GeoIP data attached to each blocked request at ingest. Requests whose source cannot be geolocated — private addresses, and anything the database has no entry for — are not plotted, and the map says it has no data rather than inventing points to fill space.
 
 **Threats, Logs and Rules** *(Full)* — Severity-ranked threat activity, a searchable and filterable request log, and a browsable CRS rule index. All three are available in Lite through `catwaf audit`, `catwaf explain` and `catwaf rules`.
 

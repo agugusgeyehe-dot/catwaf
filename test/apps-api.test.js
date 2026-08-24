@@ -147,7 +147,10 @@ const server = app.listen(0, '127.0.0.1', async () => {
   const viewerProtect = await viewer.P('/api/apps/protect', {})
   check('a viewer cannot protect', viewerProtect.status === 403, viewerProtect)
   const viewerDiscover = await viewer.P('/api/apps/discover', { skip_http_probe: true })
-  check('a viewer can still discover', viewerDiscover.status === 200, viewerDiscover.status)
+  // Discovery enumerates host containers and probes their ports — that is a
+  // write-role capability now, matching /api/apps/protect and the intel
+  // probe endpoints. A read-only account must be refused.
+  check('a viewer cannot discover (host probing is admin-only)', viewerDiscover.status === 403, viewerDiscover.status)
 
   section('concurrent runs are refused')
   // The run lock is taken once discovery is under way. Without a Docker CLI

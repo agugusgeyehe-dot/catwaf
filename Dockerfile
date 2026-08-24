@@ -46,8 +46,15 @@ COPY src ./src
 # Where the SQLite file and Caddy sync data live — created automatically at
 # runtime if missing (see services/db.js), declared here so `docker volume`
 # users have an obvious mount point without reading the source.
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data \
+    && chown -R node:node /app
 VOLUME ["/app/data"]
+
+# Run as the image's unprivileged `node` user. The API only needs to write
+# /app/data (and whatever the operator mounts there); running as root gave a
+# container escape or RCE in the API direct root in the container, with
+# write access to the shared Caddy configuration volume on top.
+USER node
 
 ENV NODE_ENV=production
 ENV PORT=8000

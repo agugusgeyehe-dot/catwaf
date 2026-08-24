@@ -42,7 +42,32 @@ const allowedOrigins = CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
 
 const app = express()
 
-app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1))
+// ─── Reverse-proxy trust ────────────────────────────────────────────────
+// `trust proxy` decides whether X-Forwarded-For/X-Forwarded-Proto may
+// influence req.ip and req.secure. Trusting one hop is correct when a proxy
+// we control (Caddy, the provisioned nginx) actually sits in front — that is
+// exactly the DOMAIN / HTTPS deployments. When neither signal is present,
+// the API is being reached directly (localhost:8000, a bare LAN port), and
+// trusting a hop would hand every client control of req.ip: rate-limit keys,
+// login throttling and CIDR checks would all key off a header the client
+// invented. Default to trusting NOTHING on direct deployments; operators who
+// front the API with their own proxy set TRUST_PROXY_HOPS explicitly.
+function parseTrustProxyHops() {
+  const raw = process.env.TRUST_PROXY_HOPS
+  const inferred = !!(process.env.DOMAIN || process.env.CATWAF_HTTPS === 'true')
+  if (raw === undefined || raw === '') {
+    const hops = inferred ? 1 : 0
+    console.warn(`[CatWAF] TRUST_PROXY_HOPS not set — defaulting to ${hops} (${inferred ? 'domain/HTTPS deployment: trusting 1 reverse-proxy hop' : 'direct deployment: forwarded IP headers are ignored'}). Set it explicitly if that is wrong.`)
+    return hops
+  }
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 0 || n > 8) {
+    console.warn(`[CatWAF] TRUST_PROXY_HOPS="${raw}" is not an integer between 0 and 8 — ignoring forwarded headers entirely (0).`)
+    return 0
+  }
+  return n
+}
+app.set('trust proxy', parseTrustProxyHops())
 app.disable('x-powered-by')
 app.disable('etag')
 

@@ -9,6 +9,357 @@ public release. Those entries are preserved below under the release they belong 
 numbers themselves were retired, not the history. Nothing here has been deleted or
 rewritten, only re-filed.
 
+## [Unreleased] — 2026-08-24 — Edge enforcement & alert delivery
+
+### New: edge ban enforcement
+Banned addresses are now rendered directly into the Caddyfile (`remote_ip` matcher +
+`abort`, refreshed on its own scheduler tick and within ~2s of any ban change) so a
+banned client's connection is dropped by Caddy itself — no forward_auth hop, no WAF
+evaluation, no bytes to the origin. Allowlist coverage is enforced in BOTH directions
+(a banned IP inside an allowlisted range AND a banned range swallowing an allowlisted
+IP are both excluded), content-hash short-circuits skip unchanged rewrites, failed
+reloads retry on the next tick, and every write goes through the config lock atomically.
+New `edge_bans` settings group; `test/features.test.js` covers rendering, allowlist
+exemption, idempotence and failure paths.
+
+### New: canary auto-ban
+Paths like `/.env`, `/.git/config`, `/.htpasswd` are intent, not traffic: the first hit
+now earns an immediate escalating ban (new `canary` ban source) instead of a plain 403.
+Dry-run (`/api/protect/test`) reports what it would do without writing; canary requests
+deliberately bypass the per-IP verdict cache so an allow earned elsewhere never excuses
+them.
+
+### New: kernel-level drops (opt-in)
+`services/kernelBans.js` mirrors active bans into a dedicated `catwaf_edge` nftables
+table (interval sets, v4+v6) for drops at SYN. Gated behind `kernel_bans.enabled` AND
+`CATWAF_KERNEL_BANS=1`, root, nftables presence, and a non-container host; CatWAF
+manages only its own table, replaced atomically each refresh (expired/lifted bans truly
+leave the set), every element re-validated before it reaches nft syntax, allowlist
+conflicts excluded in both directions. The one-time forwarding rule is operator-applied:
+`catwaf kernel-bans print-rules`.
+
+### New: alert delivery (#74) — alerts actually send now
+The webhook URLs and thresholds on the Alerts page were stored but nothing ever sent
+them. `services/alertDispatch.js` delivers to Slack/Discord/custom webhooks and
+Telegram on three triggers: blocked-request spikes (threshold + window configurable),
+new automatic bans, and engine changes — with cross-process-safe per-kind cooldowns,
+refund-on-total-delivery-failure, and per-channel fault isolation. New `alert_dispatch`
+settings group; wired into the job scheduler.
+
+### New: backup restore path
+`catwaf backup restore <file> [--db] [--allow-redacted] [--confirm-db-restore]` — config
+restores run through the same validate-and-rollback transaction pipeline as live edits;
+redacted backups refuse unless forced; out-of-range values fail validation untouched;
+database restore refuses while the server appears to be writing and stages via temp+
+rename with WAL sidecar handling.
+
+### Also
+* GeoIP database age surfaced in `/api/diagnostics` with update guidance (the bundled
+  MaxMind data is static and degrades silently otherwise).
+* OpenAPI drift test (`openapi-drift.test.js`) fails CI when Express routes and
+  openapi.yaml diverge; 102 legacy undocumented endpoints catalogued with hygiene
+  warnings.
+* Docker stack hardened: `cap_drop ALL` on backend, `NET_BIND_SERVICE`-only for Caddy,
+  log rotation, tmpfs /tmp.
+
+### Attack Map rework (dashboard)
+
+Attack markers were large dark spheres that read as black blobs on the
+globe. They are now small soft-glow points in the red family, each beating
+on its own phase so an active region shimmers rather than throbs; size
+growth with request volume is hard-capped. Severity shifts the hue slightly
+(never to near-black), and the legend matches.
+
+Hovering a dot opens a cursor-following tooltip with attack totals for that
+location across 24 hours / 5 days / 7 days / 30 days (fetched lazily,
+60s-cached). The paint-window selector gained Live / 5-day / 30-day options
+alongside the existing ones.
+
+## [Unreleased] — 2026-08-24 — Anti-DDoS, update checks & operations
+
+### New: anti-DDoS layer (#75)
+UNDER-ATTACK MODE: one switch challenges every non-exempt visitor (JavaScript proof)
+and drops cached verdicts to seconds. Slowloris-resistant connection timeouts were
+already rendered under Connections — now documented as the deliberate single source.
+
+### New: `catwaf update` (#77)
+Asks GitHub (`agugusgeyehe-dot/catwaf` releases) whether a newer version exists,
+cached daily, surfaced in CLI + diagnostics. Read-only by design — no auto-install.
+Handles "no releases published yet" gracefully.
+
+### New: SIEM event stream (#76)
+Every blocked request (optionally all requests) appended as JSON lines to
+data/siem.jsonl with size rotation, exactly-once cursor across restarts, optional
+HTTP collector POSTs. Settings group `siem`.
+
+### Improvements
+* Edge/kernel ban lists order permanent bans first — scanner churn can no longer push
+  a permanent manual ban out of the rendered set.
+* Prometheus metrics for the new tiers: edge_bans_active, kernel_bans_active,
+  canary_hits_total, alerts_delivered_total{kind} (+ runtime counter flush job).
+* `/api/protect/status` exposes ddos/canary/edge_bans/kernel_bans/alert delivery state;
+  dashboard Protection page shows an enforcement card and the Alerts page gains the
+  delivery toggle.
+* Backups can be encrypted at rest (AES-256-CBC/PBKDF2 via openssl; passphrase lives in
+  CATWAF_BACKUP_PASSPHRASE, deliberately NOT in the database). list/prune/restore all
+  understand encrypted manifests and database copies.
+* `test/edge-e2e.test.js`: real-Caddy proof that a banned source address is aborted at
+  the edge and un-banning propagates over admin-API reload.
+* `scripts/bench.js` + docs/performance.md: reproducible throughput harness with sample
+  numbers (edge region ≈ free on loopback).
+* Docs: settings reference regenerated (canary/edge_bans/kernel_bans/ddos/siem/
+  alert_dispatch), protection.md sections for every new tier, cli.md additions.
+
+## [Unreleased] — 2026-08-24 — Architecture remediation pass
+
+Follow-up to the security audit: the five "remaining concerns" were
+re-verified from scratch and remediated at the architecture level where
+needed. Every change preserves observable behavior; the full test suite
+(21 suites) passes unchanged plus new regression tests.
+
+### Cross-process configuration races — FIXED (architectural)
+
+CatWAF runs as several processes (API server, `catwaf` CLI, scheduled jobs)
+that all read-modify-write the same state blob and the same Caddyfile with
+no coordination: concurrent writers silently overwrote each other and
+interleaved Caddyfile edits could corrupt marker regions.
+
+New `services/configLock.js`: an O_EXCL lock file in the data directory with
+holder tokens, dead-pid/age-based stale breaking (a crashed holder cannot
+pin it forever), re-entrancy for nested callers, and a conservative rule —
+an unparseable or mid-write lock file is treated as LIVE, never broken.
+Every Caddyfile writer now takes this lock (`configTx.apply`, the WAF and
+sensitive-file patchers, audit-log rotation's SecAuditLog repoint,
+`catwaf auto` proxy apply, the Cloudflare origin lock), and every write is
+temp-file + `rename` atomic, so readers on other processes never see a torn
+file.
+
+State gained a revision counter (`waf__rev`) and `state.updateWAF()`, the
+cross-process-safe mutation entry point: under the lock it re-reads
+committed state if any other process moved since our last load, applies the
+mutator to that fresh object, persists, and optionally patches+reloads
+Caddy while still holding the lock. All legacy direct-writer routes (engine,
+paranoia, anomaly thresholds, WAF settings, IP lists, geo toggling, alerts,
+performance presets), CatAI actions/undo and autoconf scans migrated to it;
+user management mutators serialize through the same lock with forced-fresh
+reads.
+
+Three subtle bugs were found and fixed while building this — each one is
+covered by a regression test:
+
+* boot-time torn read pairing a new revision with an old blob (refresh
+  would then never fire again);
+* revision written BEFORE the blob let a refresher accept `(newRev,
+  oldBlob)` as a stable pair — the commit barrier is now the revision,
+  written last;
+* the stale-lock breaker could fire on a live holder's not-yet-written
+  token file; unparseable files are now judged by age, and holders verify
+  ownership after writing.
+
+`test/concurrency.test.js` spawns real child processes against a shared
+database: 8 writers × 25 mutations lose nothing, locked file writes land
+exactly once, stale locks recover, throwing mutations release the lock and
+persist nothing, atomic writes leave no debris.
+
+### DNS rebinding TOCTOU in outbound fetches — FIXED
+
+`netGuard.guardedFetch` validated DNS and then handed the *hostname* to
+`fetch`, which resolved it a second time inside undici — DNS answering the
+validation with a public address and the connection with 127.0.0.1 won both
+halves. The transport is rewritten on node:http/https with a pinned lookup:
+one resolution, judged against the reserved-range table, and only the
+judged addresses are handed to the socket, so connect cannot land anywhere
+else. SNI and Host keep pointing at the original hostname; redirect hops
+re-pin per host; responses are size-capped and content-encoding-aware
+(gzip/deflate/raw-deflate/brotli, with decompression-bomb limits). A new
+regression test drives a real local server through redirects/method/body
+semantics and proves a private DNS answer is refused before connecting.
+
+### TRUST_PROXY_HOPS footgun — MITIGATED
+
+Trusting one forwarded hop was unconditional, so any bare-port deployment
+let clients forge `req.ip` (and with it rate-limit keys and CIDR checks).
+The default is now inferred: 1 hop when DOMAIN or CATWAF_HTTPS says a proxy
+fronts the API, 0 (trust nothing) otherwise; explicit values 0–8 are
+validated, garbage fails safe to 0, and the effective choice is announced
+at boot. `test/trust-proxy.test.js` boots real servers in all four
+configurations and checks which address the server attributes.
+
+### Installer supply-chain integrity — MITIGATED (honest limits)
+
+Node itself installs from the NodeSource apt/rpm repository whose metadata
+is GPG-signed — the distro verifies every package; only the one-time
+bootstrap script rides on TLS trust alone (now documented in-place). The
+Ollama installer is saved to disk before running (never piped), runs with
+output visible instead of discarded, and honors an operator-supplied
+`CATWAF_OLLAMA_INSTALL_SHA256` pin. The caddyserver.com download API
+publishes no checksums for its builds, so nothing can be verified the way a
+release artifact can; `ensure-caddy.js` now pins a version, refuses
+off-host redirects, sanity-checks the binary image, records the build's
+SHA-256 on first install (trust-on-first-use, `data/caddy-pin.json`) and
+requires the SAME hash on reinstalls unless
+`CATWAF_CADDY_ALLOW_NEW_BUILD=1` says otherwise. The remaining boundary —
+first-install trust of the build service — is stated in the script output
+rather than hidden.
+
+### geoip-lite advisory (GHSA-mwp4-54f8-5fhr) — FIXED via upstream
+
+geoip-lite updated to ^2.0.3, which depends on ip-address 10.x: `npm audit`
+is clean. As defense-in-depth, `services/geoip.js` now only forwards
+canonical addresses (strict dotted-quad or plain hex IPv6) to the bundled
+parser — non-canonical spellings can never reach the vulnerable parsing
+path at all.
+
+## [Unreleased] — 2026-08-24 — Security audit hardening
+
+A full-pass security audit of the repository. Every fix below is minimal and
+behaviour-preserving unless stated; the existing test suite passes unchanged
+except where a test asserted the insecure behaviour being removed.
+
+### Fixed — request-path integrity
+
+- **Client-IP spoofing against the enforcement plane (high).** Caddy's
+  `forward_auth` hop proxies the visitor's *original* headers, so a visitor
+  could set `X-Real-IP` or `X-CatWAF-Client-IP` freely and every ban,
+  allowlist hit, challenge decision, attempt counter and tool-fingerprint
+  ban keyed off an address the visitor chose — banning whoever they named,
+  or rotating identity per request to evade bans. The rendered config now
+  overwrites both headers with `{http.request.remote.host}` on the enforce,
+  challenge and upload-scan hops (`render/site.js`), and `forwardedIp()` /
+  `challenge.clientIp()` no longer sniff raw `X-Forwarded-For` at all.
+- **`POST /api/protect/test` could write real bans (high).** The endpoint was
+  reachable by viewer-role accounts, accepted CIDRs with no self-lockout
+  guard, and drove the live pipeline: a viewer could ban any address —
+  including `0.0.0.0/0`, blocking every visitor — and use relay probing as a
+  port-scan-for-hire. It is now admin-only and runs the pipeline in a new
+  dry-run mode: it reports what *would* happen (including `would_ban`) while
+  writing no bans and making no outbound probe connections.
+- **Malformed cookie could hang enforcement (high).** `Cookie: catwaf_ch=%`
+  threw inside `decodeURIComponent`; on `/api/enforce` (an async handler in
+  Express 4) that meant no response at all, so forward_auth waited until
+  timeout for any visitor sending that header. Cookie parsing is now
+  throw-safe and the gateway wraps verification fail-closed.
+
+### Fixed — access control
+
+- **Webhook URLs were readable by viewer-role accounts.** `GET /api/alerts`
+  returned Slack/Discord webhook URLs and Telegram bot tokens verbatim, and
+  `GET /api/diagnostics/export` dumped all of `state.WAF` plus recent audit
+  entries to any logged-in session. Alerts reads/saves now redact
+  secret-shaped fields for non-admins, the diagnostics export is admin-only
+  and redacted, `/api/caddy/status` hides the server path from viewers, and
+  app discovery/verification are admin-only (they probe host containers and
+  fire attack-shaped requests at upstreams).
+- **`/api/alerts` accepted arbitrary keys into persisted config.** The only
+  schema-less write path left in the API now has a field allowlist. Unknown
+  keys are dropped (and reported as `ignored`) rather than rejected, so
+  legacy rows cannot brick the dashboard's save button. `POST
+  /api/alerts/test` also actually delivers now — Slack/Discord/custom
+  webhooks receive a real POST through the SSRF-guarded fetch, instead of
+  the old unconditional "sent!" fiction.
+- **Prototype-pollution sinks closed.** A persisted JSON blob carrying an
+  own `"__proto__"` key survived spread merges and fired a real prototype
+  change at every `Object.assign(state.WAF, …)` restore/load site
+  (`configTx.restoreWaf`, snapshot restore, `state.reloadAllFromDb`,
+  settings load). All loads/restores/persists now strip
+  `__proto__`/`constructor`/`prototype` keys.
+
+### Fixed — validation and injection hardening
+
+- **IPv6 input validation.** `isValidIpOrCidr` accepted junk such as `::::`
+  or prefixes beyond `/128`. Such an entry persisted to state and then broke
+  every subsequent Caddyfile render — freezing all configuration changes
+  until the row was removed by hand. Validation now fully parses the address
+  and prefix length.
+- **Cloudflare origin-lock IP list is validated before splicing.** The
+  ranges fetched from cloudflare.com went into the Caddyfile verbatim; a
+  manipulated response containing newlines or braces could inject arbitrary
+  Caddy directives. Every entry must now be exactly an IP/CIDR or the lock
+  is refused. Origin private keys are chmod 0600 after generation, and the
+  outbound list fetches have timeouts.
+- **SSRF guard: IPv4-mapped IPv6 in hex dress.** `::ffff:a00:1` is
+  10.0.0.1, but only the dotted spelling was unwrapped by
+  `netGuard.reasonNotPublic` — the origin scanner could be aimed at internal
+  hosts. Mapped literals are now normalised to their IPv4 address before the
+  reserved-range checks.
+- **Coraza rule escaping.** `escapeForDirective` neutralised backticks and
+  double quotes but not single quotes, while custom-rule names land inside
+  `msg:'…'` — a `'` could inject additional Coraza actions
+  (`ctl:ruleEngine=Off`). Single quotes are escaped now.
+- **Innocent user agents were auto-banned.** The nmap fingerprint's
+  unanchored `/nmap|nse/i` matched the substring "nse" ("Onset…",
+  "U…nse…en") — and an exact-tier hit is an automatic site-wide ban. The
+  alternative is word-bounded; real nmap still matches exactly.
+
+### Fixed — denial of service and resource limits
+
+- Challenge failure counters are capped (oldest-evicted), and the public
+  challenge endpoints carry their own rate limits — they sit before the
+  shared limiter by design, so previously nothing throttled them.
+- The bcrypt worker pool rejects work beyond a small queue bound instead of
+  accepting an unbounded login flood; saturation answers 429 rather than a
+  misleading 500.
+- Login throttling adds a per-account budget (30 attempts / 5 min) that
+  survives `X-Forwarded-For` rotation on directly exposed deployments, plus
+  a hard map-size ceiling.
+- The webroot scan walks with depth/entry bounds instead of blocking the
+  event loop on arbitrarily large trees; simulations cap concurrent Caddy
+  sandboxes at two; ClamAV replies are byte-capped and the daemon is never
+  auto-discovered under world-writable `/tmp`.
+- Analytics windows are clamped to one year, keeping `?window=100000w` from
+  turning every chart query into a full-table scan.
+
+### Fixed — availability of protection features
+
+- **The challenge page's own scripts were blocked by CatWAF's CSP.**
+  `default-src 'none'; script-src 'self'` meant the proof-of-work never ran
+  and provider widgets never loaded — enabling javascript/provider challenge
+  modes put flagged visitors into an infinite 503 loop. The page now ships a
+  purpose-built CSP (provider origins via the previously-dead
+  `cspSources()`, inline script allowed for this one interstitial).
+- Host-local integrations work again: the SSRF guard's private-range block
+  made the default local threat-feed URL (`http://127.0.0.1:8080`) and
+  self-hosted mCaptcha permanently unreachable. Those two callers opt into
+  `allowLoopback` explicitly; everything else keeps full DNS validation.
+
+### Fixed — deployment surface
+
+- `scripts/start.js` no longer hands `caddy run --config $CADDYFILE_PATH` to
+  `concurrently`, which executes command strings through a shell — anyone
+  who could write `.env` could run arbitrary commands as the service user at
+  next start. Both processes spawn argv-array direct now, with proper
+  sibling teardown and error handling, and `--experimental-sqlite` reaches
+  the backend process via `execArgv`.
+- Interactive `catwaf setup` installs the same hardened systemd unit the
+  shell installer does (sandboxing directives, dedicated service account
+  when present, `.env` chowned accordingly) instead of silently replacing a
+  hardened install with an unhardened root unit. `.env` is forced to 0600 on
+  every rewrite, not just creation.
+- The backend container drops privileges to the `node` user.
+- Backup destinations must resolve inside the configured backup directory —
+  previously any writable absolute path would do, staging a 0600 copy of the
+  entire SQLite database there and pruning `catwaf-backup-*` files in it.
+- Audit-log rotation keeps its integrity promise: a failed ingest no longer
+  marks rotation complete (the pending marker retries next cycle), prune
+  never deletes a file still referenced by a pending marker, recovery
+  validates state-file paths against directory escape, and PID-file stops
+  verify `/proc/<pid>/cmdline` before signalling (PID-reuse guard).
+
+### Fixed — CLI and misc
+
+- `environment.which()` scans `PATH` in-process instead of interpolating its
+  argument into a `sh -c` string (a latent command-injection primitive).
+- TUI log/explain rendering strips every ANSI/C0/C1 control byte from
+  attacker-shaped fields (URI, user agent, IP) — terminal escape sequences
+  planted in blocked requests could steer an operator's terminal.
+- Frontend: the gate path from localStorage/handshake is validated against
+  the exact `/g/<32-hex>` shape before any authenticated call prepends it,
+  so a poisoned value cannot redirect Bearer-token traffic cross-origin.
+  CatAI apply confirms weakening actions server-side (`confirm_weaken`).
+- Tests: `auth-flow` binds loopback unless `CATWAF_TEST_LAN=1`, suites pin
+  `CADDY_ADMIN_URL` unconditionally away from a live instance, and SIGTERM
+  cleanup gaps were reviewed.
+
 ## [1.0.2] — 2026-08-13 — Upload scanning, the configuration and protection layer, and release hardening
 
 Three bodies of work land together here. They are kept as separate sections

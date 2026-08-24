@@ -186,7 +186,9 @@ async function safeFetch(url, options) {
 
 async function ensureGate() {
   const cached = getGate()
-  if (cached?.basePath && cached.expiresAt > Date.now() + 5000) return cached
+  if (cached?.basePath && cached.expiresAt > Date.now() + 5000) {
+    try { return validateGate(cached) } catch { /* fall through to a fresh handshake */ }
+  }
   const res = await safeFetch(API_ORIGIN + '/api/handshake', {
     headers: { Authorization: `Bearer ${getToken()}` },
   })
@@ -205,7 +207,20 @@ async function ensureGate() {
   }
   const data = await res.json()
   setGate(data.api)
-  return data.api
+  return validateGate(data.api)
+}
+
+// The gate path is prepended to every authenticated request URL together
+// with the Bearer token. If a tampered localStorage value (or a compromised
+// handshake response) ever made it an absolute URL, every signed call —
+// credentials included — would be sent cross-origin. Only the exact shape
+// the server mints is accepted.
+function validateGate(gate) {
+  if (!gate || !/^\/g\/[0-9a-f]{32}$/.test(gate.basePath || '') || typeof gate.expiresAt !== 'number') {
+    setGate(null)
+    throw new Error('The API returned an invalid session path.')
+  }
+  return gate
 }
 
 async function doFetch(method, logicalPath, bodyStr, retryOn410 = true) {

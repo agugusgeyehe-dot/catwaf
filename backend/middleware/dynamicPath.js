@@ -49,7 +49,13 @@ function unwrapDynamicPath(req, res, next) {
 
   const qIndex = req.url.indexOf('?')
   const query = qIndex === -1 ? '' : req.url.slice(qIndex)
-  const rest = (m[2] || '/').split('?')[0]
+  let rest = (m[2] || '/').split('?')[0]
+  // A gate path can carry extra leading slashes ("/g/<seg>//api/..."). Left
+  // as-is, the rewritten URL would not start with "/api", skipping the
+  // requireDynamicPath decoy while any downstream slash-normalizer (a
+  // reverse proxy with merge-slashes) still routed it to the real handler
+  // ungated. Collapse them so what the gate authorized is what arrives.
+  rest = rest.replace(/^\/{2,}/, '/')
   req.url = rest + query
   req.viaDynamicPath = true
   next()

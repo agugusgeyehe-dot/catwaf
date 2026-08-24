@@ -17,6 +17,7 @@ const fs = require('fs')
 
 const caddySvc = require('../caddy')
 const configTx = require('../configTx')
+const configLock = require('../configLock')
 const generator = require('./generator')
 
 function mergeIntoCaddyfile(content, generatedRegion) {
@@ -53,7 +54,13 @@ function refreshManagedWafBlock(content, waf) {
   return content.slice(0, start) + caddySvc.buildWAFBlock(waf) + content.slice(end + END.length)
 }
 
-function apply({ routes, waf, dryRun = false } = {}) {
+function apply(options) {
+  // Whole read→merge→validate→rename cycle serialized against every other
+  // Caddyfile writer (the lock is re-entrant with configTx's own).
+  return configLock.withConfigLock(() => applyLocked(options))
+}
+
+function applyLocked({ routes, waf, dryRun = false } = {}) {
   // Coraza opens the audit log at provision time, so it must exist BEFORE
   // `caddy validate` runs or validation fails on a clean install. Do this
   // first, since it can also change the path the generated config refers to.

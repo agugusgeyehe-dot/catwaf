@@ -20,10 +20,23 @@ function run(cmd, args, opts = {}) {
   }
 }
 
+// Pure PATH scan rather than `sh -c "command -v …"`: the old form interpolated
+// the binary name into a shell string, so any future caller passing anything
+// other than a hardcoded literal would have had a command-injection primitive
+// on its hands. Every current caller is a fixed literal; this keeps it that
+// way by construction.
 function which(bin) {
-  const out = run('sh', ['-c', `command -v ${JSON.stringify(bin).slice(1, -1)} 2>/dev/null`])
-  const p = (out || '').trim().split('\n')[0]
-  return p || null
+  if (typeof bin !== 'string' || !bin || bin.includes('/')) return null
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  for (const dir of dirs) {
+    const candidate = path.join(dir, bin)
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK)
+      const st = fs.statSync(candidate)
+      if (st.isFile()) return candidate
+    } catch { /* not here — keep scanning */ }
+  }
+  return null
 }
 
 function readFileSafe(p, maxBytes = 512 * 1024) {

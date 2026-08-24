@@ -65,6 +65,22 @@ function windowCounts(sinceIso) {
   }
 }
 
+function edgeBansCollect() {
+  // Cheap count without rendering anything.
+  try {
+    const cfg = settings.get('edge_bans')
+    const bans = require('./bans').listActiveTargets({ limit: cfg.max_rules })
+      .filter(t => !require('./state').WAF.ip_whitelist?.some(e => e?.ip && (
+        require('./sanitize').ipCoveredBy(t, e.ip) || require('./sanitize').ipCoveredBy(e.ip, t))))
+    return bans.length
+  } catch { return 0 }
+}
+
+function lastKnownKernelCount() {
+  try { return Number(require('./db').getState('kernel_bans_last_count')) || 0 } catch { return 0 }
+}
+
+
 function render() {
   const cfg = settings.get('metrics')
   const out = new Exposition(cfg.prefix || 'catwaf')
@@ -82,6 +98,30 @@ function render() {
 
   out.metric('uptime_seconds', 'gauge', 'Seconds since the CatWAF API process started.')
   out.sample(Math.round((Date.now() - startedAt) / 1000))
+
+  // ── Enforcement tiers ──
+  out.metric('edge_bans_active', 'gauge', 'Number of ban targets currently rendered at the Caddy edge.')
+  let edgeCount = 0
+  try { edgeCount = require('./edgeBans').enabled() ? edgeBansCollect() : 0 } catch {}
+  out.sample(edgeCount)
+
+  out.metric('kernel_bans_active', 'gauge', 'Entries mirrored into the nftables catwaf_edge sets (0 when disabled).')
+  try {
+    const kb = require('./kernelBans')
+    const st = kb.status()
+    out.sample(st.enabled && st.env_enabled ? lastKnownKernelCount() : 0)
+  } catch { out.sample(0) }
+
+  const counters = (() => { try { return require('./counters').all() } catch { return {} } })()
+  out.metric('canary_hits_total', 'counter', 'Requests that touched a canary path and were banned.')
+  out.sample(Number(counters.canary_hits_total) || 0)
+
+  // ONE metric declaration with a kind label — emitting per-kind TYPE lines
+  // made Prometheus reject the entire exposition.
+  out.metric('alerts_delivered_total', 'counter', 'Alert deliveries attempted, by alert kind.')
+  for (const kind of ['spike', 'new_ban', 'engine_change']) {
+    out.sample(Number(counters[`alerts_delivered_${kind}`]) || 0, { kind })
+  }
 
   // ── WAF configuration, as gauges so alerts can fire on a setting change ──
   out.metric('waf_engine_enabled', 'gauge', '1 when the WAF engine is blocking, 0 when it is in detection-only or off.')

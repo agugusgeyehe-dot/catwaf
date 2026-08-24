@@ -169,8 +169,10 @@ async function scan({ dryRun = null } = {}) {
     }
     if (Object.keys(entry.plan.waf).length) {
       const state = require('./state')
-      Object.assign(state.WAF, entry.plan.waf)
-      state.saveWAF(true)
+      // Under the config lock with a fresh re-read, like every other WAF
+      // writer — an autoconf scan racing the dashboard can no longer
+      // overwrite a paranoia change made seconds earlier.
+      state.updateWAF(w => { Object.assign(w, entry.plan.waf) }, { label: 'autoconf.waf' })
       applied.push({ container: entry.container, group: 'waf' })
     }
   }

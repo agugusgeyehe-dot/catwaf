@@ -79,8 +79,56 @@ Requests to `/api/*` must satisfy all of the following:
    2-minute clock-skew window and nonce replay rejection.
 4. **A role.** Every state-changing endpoint requires the `admin` role.
 
-Rate limits apply to both gated and ungated paths, and login attempts are limited per
-IP-and-username.
+Rate limits apply to both gated and ungated paths. Login attempts are limited per
+IP-and-username **and** per account, so a client that controls its `X-Forwarded-For`
+header (direct exposure without a reverse proxy) still faces a cumulative budget per
+targeted username.
+
+A note on trust boundaries: the enforcement and upload-scan hops derive the visitor's
+address from `X-Real-IP` / `X-CatWAF-Client-IP`, which the generated Caddyfile always
+overwrites with the real connection address before anything reaches the backend. If you
+put your own proxy in front of CatWAF's API port, it must do the same — do not forward
+client-supplied versions of those headers untouched.
+
+How many forwarded hops CatWAF trusts is inferred unless you set `TRUST_PROXY_HOPS`
+explicitly: 1 when DOMAIN or CATWAF_HTTPS indicates a proxied deployment, 0 otherwise.
+On a direct deployment (dashboard on `localhost:8000`, a bare LAN port) forwarded
+headers are ignored entirely — a client cannot forge its way past rate limiting or IP
+checks by inventing them. If you front the API with your own proxy without setting
+DOMAIN, set `TRUST_PROXY_HOPS=1`.
+
+## Kernel-level drops (opt-in)
+
+The nftables mirror runs only when BOTH the setting is enabled and
+`CATWAF_KERNEL_BANS=1` is set in `.env`, and refuses to run in containers or
+without root. CatWAF creates and fills exactly one table (`inet catwaf_edge`)
+and deletes/recreates it atomically per refresh — it never touches any other
+firewall rule. The forwarding rule that makes the kernel consult the set is
+applied by you, as root, from `catwaf kernel-bans print-rules` output.
+
+## Update check
+
+`catwaf update`, the dashboard diagnostics and a daily background job perform
+one HTTPS GET to `api.github.com/repos/agugusgeyehe-dot/catwaf/releases/latest`.
+No telemetry, no identifiers beyond your IP as seen by GitHub, response cached
+for 24h. Read-only: nothing is downloaded or installed. If the repository has
+no releases yet the check reports that instead of an error.
+
+## Backup encryption
+
+With `backups.encrypt` enabled, manifests and database copies are written as
+AES-256-CBC (PBKDF2, 200k iterations) via the system `openssl`. The passphrase
+comes from `CATWAF_BACKUP_PASSPHRASE` in `.env` and is deliberately NOT stored
+in the database — a backup decryptable by whatever it protects would not be a
+backup. Lose the passphrase and the backups are gone; that is the deal.
+
+## Concurrent configuration writers
+
+The API server, the `catwaf` CLI and scheduled jobs can all change WAF configuration.
+Every mutation path serializes through one lock file in the data directory
+(`data/config.lock`), re-reads committed state before applying its change, and writes
+the Caddyfile atomically. A crashed holder's lock is broken automatically; you should
+never need to touch the file by hand.
 
 ## GeoIP data
 
@@ -145,6 +193,10 @@ it inherits the trust model of those upstream projects.
 The generated unit runs as the `catwaf` account with `NoNewPrivileges=true`,
 `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `RestrictSUIDSGID`,
 `RestrictNamespaces`, `LockPersonality`, and write access limited to the data directory.
+
+Interactive `catwaf setup` installs the same hardened unit when run as root — including
+the dedicated service account and its `.env` ownership — so re-running setup can never
+downgrade a hardened install to a root-running, unsandboxed one.
 
 CatWAF Lite installs no API service at all. If you convert a Full install to Lite, the
 existing unit is disabled and removed rather than left to fail on every boot.
