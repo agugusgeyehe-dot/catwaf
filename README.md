@@ -94,7 +94,7 @@ account; and is safe to re-run — an existing installation is updated in place.
 > without ever seeing what runs. HTTPS protects the transport; it says nothing about the
 > content. See [SECURITY.md](SECURITY.md#installer-trust-model).
 
-For **Full** with a domain, point two DNS records at your server:
+Optional — only if you want a hostname with automatic TLS. For **Full** with a domain, point two DNS records at your server:
 
 | Record | Purpose |
 |---|---|
@@ -122,11 +122,22 @@ catwaf setup --full
 `npm install` reads `CATWAF_EDITION` and installs frontend dependencies only for Full.
 `sudo npm link` puts `catwaf` on your PATH; without it, run `node bin/catwaf.js` instead.
 
-Leave the domain blank during setup to run locally — Full serves the dashboard at
-**http://localhost:8000**.
-
 There are no default accounts. Setup creates your admin login with a password you choose —
 until then, there is nothing to log into.
+
+### Where is my dashboard?
+
+No domain is required — by default nothing listens on `catwaf.<anything>`.
+Pick the shape that matches your install:
+
+| You installed… | Open | How |
+|---|---|---|
+| On this machine (default) | `http://localhost:8000` | Nothing to do — setup prints it when it finishes |
+| On a server/VPS, no domain | `http://<server-ip>:8000` | Set `HOST=0.0.0.0` in `.env`, restart, allow port 8000 through the firewall. Plain HTTP — fine for a home lab; put TLS in front before exposing it publicly ([details](SECURITY.md#network-exposure)) |
+| On a server, you own a domain | `https://catwaf.<your-domain>` | Re-run setup and enter the domain (or set `DOMAIN`), then point two DNS records — see below |
+
+The bind address and port are controlled by `HOST` / `PORT` in `.env`
+(defaults: `127.0.0.1` / `8000`).
 
 ### Upgrading Lite → Full
 
@@ -230,7 +241,10 @@ configuration would still block it — and warning loudly if it would not.
 `learning` deliberately leaves your site unprotected while active — CatWAF
 warns you before switching and requires confirmation.
 
-### Serving the dashboard at catwaf.yourdomain.com
+### Serving the dashboard on your own domain *(optional)*
+
+No domain? Skip this section — the default install serves everything itself
+on `HOST:PORT` (see *Where is my dashboard?* above).
 
 CatWAF detects what is already running on the host — Caddy, nginx, Apache, or a control panel — and generates the right configuration:
 
@@ -351,6 +365,9 @@ npm run test:e2e
 Screenshots and a demo GIF have not been captured for this release. [docs/screenshots/README.md](docs/screenshots/README.md) lists precisely what to capture and the commands that produce a real system to capture it from — deliberately, rather than shipping fabricated images.
 
 ## How it fits together
+
+Domain deployment shown; on a default install the control panel is
+`HOST:PORT` (see *Where is my dashboard?*).
 
 ```mermaid
 graph LR

@@ -49,6 +49,8 @@ characters. Changing a password invalidates every existing session for that acco
 
 ## Network exposure
 
+Binding the dashboard to every interface (`HOST=0.0.0.0` in `.env`) is how you reach it from another machine without a domain — that serves plain HTTP on port 8000 to anyone who can route to it, so keep it off the public internet or put TLS in front.
+
 **Default bindings.** The API binds `127.0.0.1:8000`. It is meant to sit behind Caddy,
 which terminates TLS and proxies to it. Do not bind it to `0.0.0.0` unless something else
 is restricting access to it.

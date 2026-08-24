@@ -775,7 +775,18 @@ async function runNonInteractive(edition, flags) {
   console.log('    catwaf status     # version, edition and component health')
   console.log('    catwaf start      # start CatWAF')
   if (spec.dashboard) {
-    console.log(`    ${info.local ? 'http://localhost:8000' : info.dashboardUrl}`)
+    const boundHost = process.env.HOST || '127.0.0.1'
+    const port = process.env.PORT || '8000'
+    if (!info.local) {
+      console.log(`    ${info.dashboardUrl}`)
+    } else if (boundHost === '127.0.0.1' || boundHost === 'localhost') {
+      console.log(`    http://localhost:${port}   (this machine only)`)
+      console.log(`    From another device? Set HOST=0.0.0.0 in .env, restart,`)
+      console.log(`    then open http://<this-server-ip>:${port} — plain HTTP, see SECURITY.md.`)
+    } else {
+      console.log(`    http://<this-server-ip>:${port}   (bound to ${boundHost})`)
+      console.log(`    Plain HTTP — a domain + TLS is recommended before exposing this publicly.`)
+    }
   } else {
     console.log('')
     console.log('  Lite has no web dashboard. Investigate from the CLI:')

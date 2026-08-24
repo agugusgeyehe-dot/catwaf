@@ -62,6 +62,17 @@ rename with WAL sidecar handling.
 * Docker stack hardened: `cap_drop ALL` on backend, `NET_BIND_SERVICE`-only for Caddy,
   log rotation, tmpfs /tmp.
 
+### Docs: how you actually reach the dashboard
+
+The default install binds `127.0.0.1:8000` and serves everything itself —
+no `catwaf.<domain>` exists unless you configure one. README, installation
+guide and `.env.example` now say so explicitly: a *Where is my dashboard?*
+table covers all three shapes (this machine / another device via
+`HOST=0.0.0.0` / a domain with TLS), the domain section is marked optional,
+the setup wizard prints LAN-access instructions when it detects a
+non-loopback bind, and the previously undocumented `HOST`/`PORT` are now in
+`.env.example`.
+
 ### Attack Map rework (dashboard)
 
 Attack markers were large dark spheres that read as black blobs on the

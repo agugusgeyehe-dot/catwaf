@@ -194,6 +194,19 @@ If CatAI is enabled, both commands first make sure Ollama is running and the mod
 | Control Panel (admin) | http://localhost:8081 |
 | Backend API | http://localhost:8000 |
 
+**Production** (`npm start`, or the installer) is simpler: one port serves
+everything — **http://localhost:8000** for the dashboard *and* the API.
+
+### Where is my dashboard?
+
+| You installed… | Open | How |
+|---|---|---|
+| On this machine (default) | `http://localhost:8000` | Nothing to do |
+| On a server/VPS, no domain | `http://<server-ip>:8000` | `HOST=0.0.0.0` in `.env`, restart, open firewall port 8000. Plain HTTP — fine for a home lab ([exposure notes](SECURITY.md#network-exposure)) |
+| You own a domain | `https://catwaf.<your-domain>` | Set `DOMAIN` / re-run setup; DNS records per [README](../README.md#where-is-my-dashboard) |
+
+`HOST` and `PORT` in `.env` control the bind address and port.
+
 Your protected site is separate from both of these: Caddy serves it on `:80`
 (and `:443` with a domain), proxying to wherever your application actually
 listens — `:8082` by convention throughout these docs. See
@@ -203,7 +216,8 @@ Log in with the admin account you created in step 3.
 
 ## 5. First things to do
 
-1. **Set a real `JWT_SECRET`** if the wizard didn't. Optional gates worth knowing about: `CATWAF_KERNEL_BANS=1` (kernel-level drops, see [protection.md](protection.md#kernel-level-drops-opt-in)) and `CATWAF_BACKUP_PASSPHRASE` (backup encryption). Both are documented in `.env.example`. Copy `.env.example` to `.env` and set a random value (`openssl rand -hex 32`). Leaving it unset means the backend generates a random one at boot — safer than a hardcoded default, but every restart invalidates existing sessions.
+1. **Set a real `JWT_SECRET`**: copy `.env.example` to `.env` and set a random value (`openssl rand -hex 32`). The wizard usually does this; leaving it unset means every restart invalidates sessions.
+2. **Optional environment gates** (all documented in `.env.example`): `CATWAF_KERNEL_BANS=1` for [kernel-level drops](protection.md#kernel-level-drops-opt-in), `CATWAF_BACKUP_PASSPHRASE` for [encrypted backups](SECURITY.md#backup-encryption).
 2. **Set `CORS_ORIGIN`** to your real dashboard URL before exposing this to the internet.
 3. **Point Caddy at your actual application** — see [reverse-proxy.md](reverse-proxy.md).
 4. **Check the Security page** (`/security-score`) — it grades your actual current configuration, not a demo number, and tells you exactly what to fix.
