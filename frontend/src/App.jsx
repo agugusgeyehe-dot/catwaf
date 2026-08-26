@@ -200,7 +200,7 @@ function SettingsPage() {
             <div style={{ fontSize: 12, color: 'var(--cat-sub)', marginTop: 2 }}>Replay the guided tour of every CatWAF feature</div>
           </div>
           <button className="btn btn-ghost btn-sm" onClick={() => { resetTour(); window.location.reload() }} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <img src="/catwaf-icon-256.png" alt="" style={{ width: 14, height: 14, objectFit: 'contain' }} /> Replay Tour
+            <img src="/assets/logo/catwaf-icon-256.png" alt="" style={{ width: 14, height: 14, objectFit: 'contain' }} /> Replay Tour
           </button>
         </div>
       </div>
@@ -226,8 +226,11 @@ function SettingsPage() {
         </div>
 
         <div className="catwaf-credit">
-          <img src="/catwaf-icon-256.png" alt="" />
-          <span>MADE BY <strong>Zachary Yanakiev</strong></span>
+          <img src="/assets/logo/catwaf-icon-256.png" alt="" />
+          <div className="catwaf-credit-text">
+            <span>MADE BY <strong>Zachary Yanakiev</strong></span>
+            <span className="catwaf-credit-initials">K.Z.</span>
+          </div>
         </div>
       </div>
 

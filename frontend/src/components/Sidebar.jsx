@@ -144,7 +144,7 @@ export default function Sidebar({ open, onClose, collapsed, onToggleCollapse }) 
         <div className="sidebar-head">
           <div className="sidebar-brand">
             <div className="animate-logo" style={{ width: 28, height: 28, borderRadius: 8, background: 'color-mix(in srgb, var(--cat-accent) 20%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', flexShrink: 0 }}>
-              <img src="/catwaf-icon-256.png" alt="CatWAF" style={{ width: 20, height: 20, objectFit: 'contain' }} />
+              <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" style={{ width: 20, height: 20, objectFit: 'contain' }} />
             </div>
             <div className="sidebar-brand-text">
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--cat-text)', lineHeight: 1 }}>CatWAF</div>

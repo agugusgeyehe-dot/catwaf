@@ -301,7 +301,7 @@ export function AboutPage() {
   return (
     <div className="p-6 space-y-4 page-enter">
       <div className="card animate-slide-up text-center py-10">
-        <img src="/catwaf-icon-256.png" alt="CatWAF" className="mb-4 mx-auto" style={{ width: 48, height: 48, objectFit: 'contain' }} />
+        <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" className="mb-4 mx-auto" style={{ width: 48, height: 48, objectFit: 'contain' }} />
         <div className="text-xl font-bold text-cat-text mb-1">CatWAF</div>
         <div className="text-xs text-cat-sub mb-6">Control Panel {info?.catwaf_version ? `v${info.catwaf_version}` : ''}</div>
         <div className="grid grid-cols-2 gap-3 max-w-xs mx-auto text-left">

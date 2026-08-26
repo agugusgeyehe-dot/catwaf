@@ -60,7 +60,7 @@ export default function Login() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28 }}>
               <div className="animate-logo" style={{ width: 48, height: 48, borderRadius: 14, background: 'color-mix(in srgb, var(--cat-accent) 24%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                <img src="/catwaf-icon-256.png" alt="CatWAF" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+                <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" style={{ width: 34, height: 34, objectFit: 'contain' }} />
               </div>
               <div>
                 <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--cat-text)', letterSpacing: '-0.01em' }}>CatWAF</div>
@@ -90,7 +90,7 @@ export default function Login() {
         <form onSubmit={submit} className="card" style={{ padding: 32, borderRadius: 18, alignSelf: 'center', animation: 'cardIn 0.6s 0.1s cubic-bezier(0.16,1,0.3,1) both' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
             <div className="animate-logo" style={{ width: 42, height: 42, borderRadius: 12, background: 'color-mix(in srgb, var(--cat-accent) 20%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-              <img src="/catwaf-icon-256.png" alt="CatWAF" style={{ width: 30, height: 30, objectFit: 'contain' }} />
+              <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" style={{ width: 30, height: 30, objectFit: 'contain' }} />
             </div>
             <div>
               <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--cat-text)', letterSpacing: '-0.01em' }}>

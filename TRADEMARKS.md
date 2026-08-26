@@ -1,6 +1,6 @@
 # Trademarks
 
-"CatWAF" and the CatWAF cat logo are trademarks of Zachary Yanakiev. They are
+"CatWAF" and the CatWAF cat logo are trademarks of Zachary Yanakiev (K.Z.). They are
 not licensed under the software license in [LICENSE](LICENSE), which covers
 only the source code.
 

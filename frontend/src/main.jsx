@@ -12,7 +12,7 @@ function BootScreen() {
   return (
     <div className="animate-fade-in" style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: 'var(--cat-bg)' }}>
       <div className="animate-logo" style={{ width: 48, height: 48, borderRadius: 14, background: 'color-mix(in srgb, var(--cat-accent) 24%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-        <img src="/catwaf-icon-256.png" alt="CatWAF" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+        <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" style={{ width: 34, height: 34, objectFit: 'contain' }} />
       </div>
       <Spinner size={16} />
     </div>
@@ -29,7 +29,7 @@ function ApiDownScreen({ detail, onRetry }) {
       <div className="card" style={{ maxWidth: 460, padding: 30, borderRadius: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
           <div style={{ width: 40, height: 40, borderRadius: 12, background: 'color-mix(in srgb, var(--cat-accent) 20%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-            <img src="/catwaf-icon-256.png" alt="" style={{ width: 28, height: 28, objectFit: 'contain' }} />
+            <img src="/assets/logo/catwaf-icon-256.png" alt="" style={{ width: 28, height: 28, objectFit: 'contain' }} />
           </div>
           <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--cat-text)' }}>CatWAF API is unavailable</div>
         </div>

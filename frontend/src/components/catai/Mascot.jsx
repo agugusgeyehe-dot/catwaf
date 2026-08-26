@@ -1,7 +1,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-const ICON = '/catwaf-icon-256.png'
+const ICON = '/assets/logo/catwaf-icon-256.png'
 
 const STATE_CLASS = {
   idle: 'catai-mascot-idle',

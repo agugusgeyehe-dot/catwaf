@@ -199,7 +199,7 @@ export default function WelcomeTour({ onDone }) {
   if (phase === 'done') return (
     <div style={{ position:'fixed',inset:0,zIndex:300,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(0,0,0,.7)',backdropFilter:'blur(8px)',animation:'fadeIn .3s ease' }}>
       <div style={{ textAlign:'center', animation:'cardIn .5s cubic-bezier(.16,1,.3,1)' }}>
-        <img src="/catwaf-icon-256.png" alt="CatWAF" style={{ width: 64, height: 64, marginBottom: 16, objectFit: 'contain' }} />
+        <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" style={{ width: 64, height: 64, marginBottom: 16, objectFit: 'contain' }} />
         <div style={{ fontSize:24, fontWeight:700, color:'var(--cat-text)', marginBottom:8 }}>You're all set!</div>
         <div style={{ fontSize:14, color:'var(--cat-sub)' }}>CatWAF is ready to protect your app.</div>
       </div>
@@ -211,7 +211,7 @@ export default function WelcomeTour({ onDone }) {
       <div style={{ width:'100%',maxWidth:520,background:'var(--cat-card)',border:'1px solid var(--cat-border)',borderRadius:20,padding:36,boxShadow:'0 32px 80px rgba(0,0,0,.6)',animation:'cardIn .4s cubic-bezier(.16,1,.3,1)' }}>
 
         <div style={{ textAlign:'center', marginBottom:24 }}>
-          <img src="/catwaf-icon-256.png" alt="CatWAF" style={{ width: 52, height: 52, animation: 'logoFloat 4s ease-in-out infinite', display: 'inline-block', objectFit: 'contain' }} />
+          <img src="/assets/logo/catwaf-icon-256.png" alt="CatWAF" style={{ width: 52, height: 52, animation: 'logoFloat 4s ease-in-out infinite', display: 'inline-block', objectFit: 'contain' }} />
           <div style={{ fontSize:22, fontWeight:800, color:'var(--cat-text)', letterSpacing:'-.02em', marginTop:8 }}>Welcome to CatWAF</div>
           <div style={{ fontSize:13, color:'var(--cat-sub)', marginTop:6, lineHeight:1.6 }}>
             A web application firewall for your site, powered by Coraza + the OWASP Core Rule Set.<br/>

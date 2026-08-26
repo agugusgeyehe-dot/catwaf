@@ -23,7 +23,7 @@ async function main() {
         const trace = `${dbDir}/trace.log`
         const t0 = Date.now()
         const info = configLock._internal.lockInfo()
-        const sawRev = Number(require('/home/zachary/catwaf-free-release/backend/services/db.js').getState('waf__rev'))
+        const sawRev = Number(require(path.join(ROOT, 'backend', 'services', 'db.js')).getState('waf__rev'))
         w.ip_blacklist.push({ ip: `10.${tag}.${i}.1`, note: String(tag), added_at: '', expires_at: null })
         fs2.appendFileSync(trace, `${t0} tag=${tag} i=${i} sawRev=${sawRev} countAfter=${w.ip_blacklist.length}\n`)
       }, { label: `test.waf.${tag}` })

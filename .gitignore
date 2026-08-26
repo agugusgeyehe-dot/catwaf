@@ -76,6 +76,9 @@ playwright-report/
 *.orig
 *.rej
 
+# Never let an unrelated embedded repo sneak into the tree again.
+/gclicker/
+
 # Editor / OS metadata
 .vscode/
 .idea/
